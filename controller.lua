@@ -1,196 +1,107 @@
--- controller_with_handshake.lua (persistent, depth assignment, label handshake, and using numeric IDs)
-
+-- controller.lua
 local STATE_FILE = "controller_state.txt"
-local shaftsWide = 4
-local shaftsLong = 4
-local shaftSpacing = 3
+local shaftsWide, shaftsLong, shaftSpacing = 4, 4, 3
+local modemSide = peripheral.find("modem")
+if not modemSide then error("No modem attached") end
+rednet.open(modemSide)
 
--- expected turtle labels (can expand or replace with dynamic discovery)
-local turtleLabels = { "miner1", "miner2", "miner3", "miner4" }
-
--- mappings: label -> numeric rednet ID
-local turtleIDs = {}
-local activeTasks = {} -- label -> { job, status }
-local pausedTurtles = {}
-local finishedCount = 0
-local totalJobs = shaftsWide * shaftsLong
-local jobQueue = {}
-
--- load / save state
-local function saveControllerState()
-  local data = { jobQueue = jobQueue, activeTasks = activeTasks, finishedCount = finishedCount, pausedTurtles = pausedTurtles }
-  local h = fs.open(STATE_FILE, "w")
-  h.write(textutils.serialize(data))
+-- persistent state load/save
+local jobQueue, activeTasks, finishedCount, paused = {}, {}, 0, {}
+local function save() 
+  local h=fs.open(STATE_FILE,"w")
+  h.write(textutils.serialize{jobQueue,activeTasks,finishedCount,paused})
   h.close()
 end
-
-local function loadControllerState()
+local function load()
   if not fs.exists(STATE_FILE) then return false end
-  local h = fs.open(STATE_FILE, "r")
-  local data = textutils.unserialize(h.readAll())
-  h.close()
-  jobQueue = data.jobQueue or {}
-  activeTasks = data.activeTasks or {}
-  finishedCount = data.finishedCount or 0
-  pausedTurtles = data.pausedTurtles or {}
+  local h=fs.open(STATE_FILE,"r")
+  local t=textutils.unserialize(h.readAll()); h.close()
+  jobQueue,activeTasks,finishedCount,paused = table.unpack(t)
   return true
 end
 
--- initialize job queue if fresh
-local resumed = loadControllerState()
+local resumed = load()
 if not resumed then
-  for z = 0, shaftsLong - 1 do
-    for x = 0, shaftsWide - 1 do
-      table.insert(jobQueue, { x = x * shaftSpacing, z = z * shaftSpacing })
+  for z=0,shaftsLong-1 do
+    for x=0,shaftsWide-1 do
+      table.insert(jobQueue,{x=x*shaftSpacing,z=z*shaftSpacing})
     end
   end
+  save()
 end
 
--- networking setup (auto-detect modem)
-local modemSide
-for _, side in ipairs({"left","right","top","bottom","front","back"}) do
-  if peripheral.getType(side) == "modem" then
-    modemSide = side
-    break
-  end
-end
-if not modemSide then
-  print("ERROR: No modem attached to controller.")
-  return
-end
-rednet.open(modemSide)
-
--- GUI
 local function clearScreen()
-  term.setBackgroundColor(colors.black)
-  term.setTextColor(colors.white)
-  term.clear()
-  term.setCursorPos(1,1)
+  term.clear(); term.setCursorPos(1,1)
 end
-local function centerPrint(str)
-  local w,_ = term.getSize()
-  local x = math.floor((w - #str)/2)
-  term.setCursorPos(x, select(2, term.getCursorPos()))
-  print(str)
-end
-local function drawGUI()
+
+local function draw()
   clearScreen()
-  centerPrint("=== Mining Grid Controller ===")
-  print(string.format("Total Shafts: %d", totalJobs))
-  print(string.format("Completed: %d / %d", finishedCount, totalJobs))
-  print(string.format("Progress: %d%%", math.floor((finishedCount/totalJobs)*100)))
-  print("
-Active Turtles:")
-  for _, label in ipairs(turtleLabels) do
-    local task = activeTasks[label]
-    local status = "idle"
-    if task then status = task.status end
-    local line = "- " .. label .. ": " .. status
-    if task and task.job then
-      line = line .. string.format(" (X=%s,Z=%s", tostring(task.job.x or "?"), tostring(task.job.z or "?"))
-      if task.job.maxDepth then line = line .. ", depthLimit=" .. task.job.maxDepth end
-      line = line .. ")"
-    end
-    if pausedTurtles[label] then line = line .. " [PAUSED]" end
-    print(line)
+  print(("Shafts: %d  Done: %d  %%: %d"):format(
+    shaftsWide*shaftsLong, finishedCount,
+    math.floor(finishedCount/(shaftsWide*shaftsLong)*100)))
+  print("\nActive:")
+  for id,task in pairs(activeTasks) do
+    print(("- %s: %s (%d,%d)"):format(id,task.status,task.job.x,task.job.z))
   end
-  print("
-Commands: resume | setdepth <turtleLabel> <maxDepth>")
+  if next(paused) then
+    print("\nPaused:")
+    for id in pairs(paused) do print(" * "..id) end
+    print("Type 'resume' to continue.")
+  end
 end
 
--- assignment logic
-local function assignJobToLabel(label)
-  if not turtleIDs[label] then return end
-  if activeTasks[label] then return end
-  if #jobQueue == 0 then return end
-  local job = table.remove(jobQueue,1)
-  rednet.send(turtleIDs[label], textutils.serialize(job))
-  activeTasks[label] = { job = job, status = "mining" }
-  saveControllerState()
+local function assign(id)
+  if #jobQueue==0 then return end
+  local job=table.remove(jobQueue,1)
+  rednet.send(id,textutils.serialize{event="job",job=job})
+  activeTasks[id]={job=job,status="mining"}
+  save()
 end
 
--- Event loop handlers
-local function keyboardListener()
+-- keyboard
+parallel.waitForAny(function()
   while true do
-    local input = read()
-    local parts = {}
-    for w in input:gmatch("%S+") do table.insert(parts, w) end
-    if parts[1] == "resume" then
-      for label,_ in pairs(pausedTurtles) do
-        if turtleIDs[label] then
-          rednet.send(turtleIDs[label], "resume")
-          if activeTasks[label] then activeTasks[label].status = "resuming" end
-        end
+    local cmd=read():match("%S+")
+    if cmd=="resume" then
+      for id in pairs(paused) do
+        rednet.send(id,"resume")
+        activeTasks[id].status="resuming"
       end
-      pausedTurtles = {}
-      saveControllerState()
-    elseif (parts[1] == "setdepth" or parts[1] == "depth") and parts[2] and parts[3] then
-      local label = parts[2]
-      local depth = tonumber(parts[3])
-      if not depth then print("Invalid depth")
-      elseif not turtleIDs[label] then print("Unknown turtle: "..label)
-      else
-        rednet.send(turtleIDs[label], textutils.serialize({ event = "set_depth", maxDepth = depth }))
-        activeTasks[label] = { job = { x=0, z=0, maxDepth = depth }, status = "mining to depth "..depth }
-        saveControllerState()
-        print("Sent depth job to "..label)
-      end
+      paused={}
+      save()
     end
   end
-end
+end,
 
-local function networkListener()
+-- network listener
+function()
   while true do
-    local senderId, msg = rednet.receive()
-    local data = {}
-    if type(msg) == "string" then
-      local ok, parsed = pcall(textutils.unserialize, msg)
-      if ok and type(parsed) == "table" then data = parsed end
-    end
-    if type(data) == "table" and data.sender then
-      local label = data.sender
-      -- register if hello
-      if data.event == "hello" then
-        turtleIDs[label] = senderId
-        -- assign initial job if any pending
-        assignJobToLabel(label)
-      elseif data.event == "done" then
-        finishedCount = finishedCount + 1
-        activeTasks[label] = nil
-        assignJobToLabel(label)
-        saveControllerState()
-      elseif data.event == "chest_full" then
-        pausedTurtles[label] = true
-        if activeTasks[label] then activeTasks[label].status = "paused (waiting)" end
-        saveControllerState()
-      end
-    elseif type(msg) == "string" and msg == "done" then
-      -- fallback if turtle sent raw done: deduce label from known id mapping
-      for lab,id in pairs(turtleIDs) do
-        if id == senderId then
-          finishedCount = finishedCount + 1
-          activeTasks[lab] = nil
-          assignJobToLabel(lab)
-          saveControllerState()
-          break
-        end
+    local sender,msg = rednet.receive()
+    local ok,data = pcall(textutils.unserialize,msg)
+    if ok and type(data)=="table" then
+      if data.event=="hello" then
+        assign(sender)
+      elseif data.event=="done" then
+        finishedCount=finishedCount+1
+        activeTasks[sender]=nil
+        assign(sender)
+        save()
+      elseif data.event=="chest_full" then
+        paused[sender]=true
+        activeTasks[sender].status="paused"
+        save()
       end
     end
   end
-end
+end,
 
--- main
-parallel.waitForAny(
-  function()
-    while finishedCount < totalJobs do
-      drawGUI()
-      sleep(1)
-    end
-    drawGUI()
-    print("
-✅ All mining shafts completed!")
-    if fs.exists(STATE_FILE) then fs.delete(STATE_FILE) end
-  end,
-  keyboardListener,
-  networkListener
-)
+-- main GUI loop
+function()
+  while finishedCount<shaftsWide*shaftsLong do
+    draw()
+    sleep(1)
+  end
+  draw()
+  print("\nAll shafts completed!")
+  fs.delete(STATE_FILE)
+end)
