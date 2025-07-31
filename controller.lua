@@ -3,7 +3,7 @@ local STATE_FILE = "controller_state.txt"
 local shaftsWide, shaftsLong, shaftSpacing = 4, 4, 3
 local totalJobs = shaftsWide * shaftsLong
 
--- find modem side (wired or wireless)
+-- find modem side
 local modemSide
 for _, side in ipairs({"left","right","top","bottom","front","back"}) do
   local t = peripheral.getType(side)
@@ -51,7 +51,6 @@ local function loadState()
   return true
 end
 
--- initialize job queue if fresh
 local resumed = loadState()
 if not resumed then
   for z = 0, shaftsLong - 1 do
@@ -103,7 +102,14 @@ local function assignNext(label)
   saveState()
 end
 
--- input loop
+-- periodically broadcast whois to prompt turtles to announce themselves
+local function whoisBroadcaster()
+  while finishedCount < totalJobs do
+    rednet.broadcast(textutils.serialize({ event = "whois" }))
+    sleep(3)
+  end
+end
+
 local function keyboardLoop()
   while true do
     local line = read()
@@ -136,7 +142,6 @@ local function keyboardLoop()
   end
 end
 
--- network loop
 local function networkLoop()
   while true do
     local senderId, msg = rednet.receive()
@@ -166,7 +171,6 @@ local function networkLoop()
         saveState()
       end
     else
-      -- fallback for raw done
       if msg == "done" then
         local label = idToLabel[senderId]
         if label then
@@ -180,7 +184,6 @@ local function networkLoop()
   end
 end
 
--- main
 parallel.waitForAny(
   function()
     while finishedCount < totalJobs do
@@ -192,5 +195,6 @@ parallel.waitForAny(
     if fs.exists(STATE_FILE) then fs.delete(STATE_FILE) end
   end,
   keyboardLoop,
-  networkLoop
+  networkLoop,
+  whoisBroadcaster
 )
