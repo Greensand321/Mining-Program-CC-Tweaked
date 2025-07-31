@@ -1,40 +1,39 @@
--- miner.lua (with set_depth support, structured messaging, label check, stage recovery, delayed retry on dump resume, manual-complete control)
+-- miner.lua (with bedrock detection, auto handshake retry, and structured messaging)
 
 local STATE_FILE = "state.txt"
 local FUEL_SLOT = 16
 local CHEST_DISTANCE = 5
 
 local label = os.getComputerLabel()
-if not label then
-  print("ERROR: Turtle must have a label. Use os.setComputerLabel('minerX')")
+if not label or label == "" then
+  print("ERROR: Turtle must have a label. Use 'label set <name>'")
   return
 end
 
--- manual state clear: run with 'clear' to wipe stored state after completion
-local args = { ... }
-if args[1] == "clear" then
-  if fs.exists(STATE_FILE) then
-    fs.delete(STATE_FILE)
-    print("State cleared manually.")
-  else
-    print("No state to clear.")
-  end
-  return
-end
-
--- open modem (auto-detect)
-local modemSideName
+-- find modem side
+local modemSide
 for _, side in ipairs({"left","right","top","bottom","front","back"}) do
-  if peripheral.getType(side) == "modem" then
-    modemSideName = side
+  if peripheral.getType(side) and peripheral.getType(side):match("modem") then
+    modemSide = side
     break
   end
 end
-if not modemSideName then
-  print("ERROR: No modem found.")
+if not modemSide then
+  print("ERROR: No modem attached")
   return
 end
-rednet.open(modemSideName)
+rednet.open(modemSide)
+
+local haveTask = false
+local task = nil
+
+local function sendEvent(event, extra)
+  local payload = { event = event, sender = label }
+  if extra then
+    for k,v in pairs(extra) do payload[k] = v end
+  end
+  rednet.send(0, textutils.serialize(payload))
+end
 
 local function saveState(state)
   local h = fs.open(STATE_FILE, "w")
@@ -59,26 +58,42 @@ local function refuelIfNeeded()
   if turtle.getFuelLevel() < 100 then
     turtle.select(FUEL_SLOT)
     if not turtle.refuel() then
-      print("WARNING: Unable to refuel; no fuel in slot " .. FUEL_SLOT .. ".")
+      sendEvent("error", { code = "F01", detail = "out of fuel" })
     end
   end
 end
 
 local function moveForwardN(n)
   for i = 1, n do
+    local retries = 0
     while not turtle.forward() do
       turtle.dig()
       turtle.attack()
-      sleep(0.2)
+      retries = retries + 1
+      if retries > 5 then
+        sendEvent("error", { code = "T02", detail = "forward blocked" })
+        sleep(1)
+        retries = 0
+      else
+        sleep(0.2)
+      end
     end
   end
 end
 
 local function digDown()
+  local retries = 0
   while not turtle.down() do
     turtle.digDown()
     if turtle.attackDown then turtle.attackDown() end
-    sleep(0.2)
+    retries = retries + 1
+    if retries > 5 then
+      sendEvent("error", { code = "T03", detail = "down blocked" })
+      sleep(1)
+      retries = 0
+    else
+      sleep(0.2)
+    end
   end
 end
 
@@ -95,6 +110,14 @@ local function tryDropAll()
     if not turtle.drop() then return false end
   end
   return true
+end
+
+local function isBedrockBelow()
+  local ok, data = turtle.inspectDown()
+  if ok and data and data.name:lower():find("bedrock") then
+    return true
+  end
+  return false
 end
 
 local function dumpInventory(task)
@@ -116,6 +139,7 @@ local function dumpInventory(task)
   end
 
   if chestFull then
+    sendEvent("chest_full")
     print("Chest full. Waiting for resume...")
     while true do
       local _, msg = rednet.receive()
@@ -126,7 +150,6 @@ local function dumpInventory(task)
           if tryDropAll() then turtle.down(); break end
           turtle.down()
         end
-        print("Dump still failing; waiting 1s before next resume attempt.")
         sleep(1)
       end
     end
@@ -139,26 +162,18 @@ local function dumpInventory(task)
   saveState(task)
 end
 
-local function mineShaft(task)
+local function mineShaft(task, maxDepth)
   local depth = task.depth or 0
   while true do
-    -- respect maxDepth if provided
-    if task.maxDepth and depth >= task.maxDepth then break end
-    while turtle.detectDown() and not pcall(digDown) do
-      -- if digDown fails, break
-      break
-    end
-    -- clear surroundings
+    if maxDepth and depth >= maxDepth then break end
+    if isBedrockBelow() then break end
+
     turtle.dig()
     turtle.digUp()
-    turtle.turnRight()
-    turtle.dig()
-    turtle.turnLeft()
-    turtle.turnLeft()
-    turtle.dig()
-    turtle.turnRight()
-
+    turtle.turnRight() turtle.dig() turtle.turnLeft()
+    turtle.turnLeft() turtle.dig() turtle.turnRight()
     digDown()
+
     depth = depth + 1
     task.depth = depth
     task.stage = "mining"
@@ -173,51 +188,73 @@ local function mineShaft(task)
   for i = 1, depth do turtle.up() end
 end
 
-local task = loadState()
-if task and task.stage == "dumping" then
+-- load persisted state if any
+local persisted = loadState()
+if persisted and persisted.stage == "dumping" then
+  task = persisted
   print("Recovering from dump stage...")
   dumpInventory(task)
-elseif not task then
-  print("Waiting for task...")
-  local _, msg = rednet.receive()
-  local incoming = textutils.unserialize(msg)
-  if type(incoming) == "table" and incoming.event == "set_depth" and type(incoming.maxDepth) == "number" then
-    task = { x = 0, z = 0, depth = 0, stage = "mining", maxDepth = incoming.maxDepth }
-  else
-    task = incoming
-    if not task or type(task) ~= "table" or not task.x or not task.z then
-      print("ERROR: Invalid task received.")
-      return
-    end
-    task.depth = 0
-    task.stage = "mining"
+end
+
+-- advertise presence until task arrives
+local function handshakeLoop()
+  while not haveTask do
+    sendEvent("hello")
+    sleep(3)
   end
 end
 
-print("Starting shaft: X=" .. (task.x or 0) .. ", Z=" .. (task.z or 0) .. (task.maxDepth and (" maxDepth=" .. task.maxDepth) or ""))
-refuelIfNeeded()
-
--- move to shaft start if needed
-if task.x and task.z then
-  turtle.turnRight()
-  moveForwardN(task.x)
-  turtle.turnLeft()
-  moveForwardN(task.z)
+local function receiveLoop()
+  while true do
+    local _, msg = rednet.receive()
+    local ok, data = pcall(textutils.unserialize, msg)
+    if ok and type(data) == "table" then
+      if data.event == "job" then
+        haveTask = true
+        task = data.job
+        task.depth = task.depth or 0
+        task.stage = "mining"
+      elseif data.event == "set_depth" then
+        haveTask = true
+        task = { x = 0, z = 0, depth = 0, stage = "mining", maxDepth = data.maxDepth }
+      elseif data.event == "whois" then
+        sendEvent("hello")
+      elseif data.event == "resume" then
+        -- no-op; will continue
+      end
+    end
+    if haveTask then break end
+  end
 end
 
-mineShaft(task)
+parallel.waitForAny(
+  function() handshakeLoop() end,
+  function() receiveLoop() end
+)
+
+if not task then
+  print("No task received, aborting.")
+  return
+end
+
+-- start mining
+print("Starting task:", textutils.serialize(task))
+refuelIfNeeded()
+if task.x and task.z then
+  turtle.turnRight() moveForwardN(task.x)
+  turtle.turnLeft() moveForwardN(task.z)
+end
+mineShaft(task, task.maxDepth)
 
 -- return to origin
-if task.x and task.z then
-  turtle.turnLeft()
-  moveForwardN(task.x)
-  turtle.turnLeft()
-  moveForwardN(task.z)
-end
+turtle.turnLeft() turtle.turnLeft()
+if task.z then moveForwardN(task.z) end
+turtle.turnRight()
+if task.x then moveForwardN(task.x) end
+turtle.turnLeft()
 
--- mark complete (user must manually clear)
 task.stage = "complete"
 saveState(task)
-
 dumpInventory(task)
-rednet.send(0, "done")
+clearState()
+sendEvent("done")
