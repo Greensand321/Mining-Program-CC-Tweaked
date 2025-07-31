@@ -58,9 +58,7 @@ if not modemSide then
   print("ERROR: No modem attached to controller.")
   return
 end
-rednet.open(modemSideName)
--- announce presence to controller
-rednet.send(0, textutils.serialize({ event = "hello", sender = label }))
+rednet.open(modemSide)
 
 -- GUI
 local function clearScreen()
@@ -144,7 +142,11 @@ end
 local function networkListener()
   while true do
     local senderId, msg = rednet.receive()
-    local data = (type(msg) == "string" and pcall(textutils.unserialize, msg)) and textutils.unserialize(msg) or {}
+    local data = {}
+    if type(msg) == "string" then
+      local ok, parsed = pcall(textutils.unserialize, msg)
+      if ok and type(parsed) == "table" then data = parsed end
+    end
     if type(data) == "table" and data.sender then
       local label = data.sender
       -- register if hello
