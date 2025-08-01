@@ -1,13 +1,8 @@
--- Updated controller.lua: GPS chunk-anchored job queue with fallback manual origin
+-- controller.lua: simple mining controller with menu interface
 
-local STATE_FILE = "controller_state.txt"
-local chunksWide, chunksHigh = 4, 4  -- adjustable grid size in chunks
-
--- find modem
 local modemSide
-for _, side in ipairs({"left","right","top","bottom","front","back"}) do
-  local t = peripheral.getType(side)
-  if t and t:match("modem") then
+for _,side in ipairs({"left","right","top","bottom","front","back"}) do
+  if peripheral.getType(side) and peripheral.getType(side):match("modem") then
     modemSide = side
     break
   end
@@ -15,360 +10,197 @@ end
 if not modemSide then error("No modem attached") end
 rednet.open(modemSide)
 
--- state containers
+local chunksWide, chunksHigh = 4, 4
+local maxDepth = 20
+local baseChunkX, baseChunkZ = 0, 0
+
+local turtles = {} -- label -> {id=, started=bool, ready=bool, job=table, progress=table, error=string}
 local jobQueue = {}
-local activeTasks = {}    -- label -> { job=..., status=..., actualChunk=... }
-local paused = {}         -- label -> true
-local finishedCount = 0
-local labelToID = {}      -- label -> rednet ID
-local idToLabel = {}      -- rednet ID -> label
-local suspendGUI = false
-local connected = {}       -- label -> bool
+local miningActive = false
+local paused = false
 
-local totalJobs = chunksWide * chunksHigh
-
-local function saveState()
-  local h = fs.open(STATE_FILE, "w")
-  h.write(textutils.serialize({
-    jobQueue = jobQueue,
-    activeTasks = activeTasks,
-    paused = paused,
-    finishedCount = finishedCount,
-    labelToID = labelToID,
-    idToLabel = idToLabel,
-  }))
-  h.close()
+local function send(id, data)
+  rednet.send(id, textutils.serialize(data))
 end
 
-local function verifyConnections()
-  if next(labelToID) == nil then return end
-  print("Verifying connected turtles...")
-  local awaiting = {}
-  for label, id in pairs(labelToID) do
-    awaiting[label] = true
-    rednet.send(id, textutils.serialize({ event = "ping" }))
-  end
-  local start = os.clock()
-  while next(awaiting) and os.clock() - start < 4 do
-    local sender, msg = rednet.receive(1)
-    if sender then
-      local ok, data = pcall(textutils.unserialize, msg)
-      if ok and type(data) == "table" and data.event == "pong" and data.sender then
-        connected[data.sender] = true
-        awaiting[data.sender] = nil
-      end
+local function buildJobs()
+  jobQueue = {}
+  for dz=0,chunksHigh-1 do
+    for dx=0,chunksWide-1 do
+      table.insert(jobQueue, {chunkX=baseChunkX+dx, chunkZ=baseChunkZ+dz, maxDepth=maxDepth})
     end
-  end
-  for label,_ in pairs(awaiting) do
-    connected[label] = false
   end
 end
 
-local function loadState()
-  if not fs.exists(STATE_FILE) then return false end
-  local h = fs.open(STATE_FILE, "r")
-  local ok, data = pcall(textutils.unserialize, h.readAll())
-  h.close()
-  if not ok or type(data) ~= "table" then return false end
-  jobQueue = data.jobQueue or {}
-  activeTasks = data.activeTasks or {}
-  paused = data.paused or {}
-  finishedCount = data.finishedCount or 0
-  labelToID = data.labelToID or {}
-  idToLabel = data.idToLabel or {}
-  return true
-end
-
--- initialize job queue with GPS-based chunk origin or manual fallback
-local resumed = loadState()
-if not resumed then
-  local baseChunkX, baseChunkZ
-  local x,y,z = gps.locate(5)
-  if x then
-    baseChunkX = math.floor(x / 16)
-    baseChunkZ = math.floor(z / 16)
-    print(("Controller GPS located at chunk (%d, %d)"):format(baseChunkX, baseChunkZ))
-  else
-    print("WARNING: GPS locate failed. Please input base chunk coordinates manually.")
-    write("Base chunk X: ")
-    baseChunkX = tonumber(read())
-    write("Base chunk Z: ")
-    baseChunkZ = tonumber(read())
-    if not baseChunkX or not baseChunkZ then
-      error("Invalid manual chunk origin")
-    end
-  end
-  for dz = 0, chunksHigh - 1 do
-    for dx = 0, chunksWide - 1 do
-      local chunkX = baseChunkX + dx
-      local chunkZ = baseChunkZ + dz
-      table.insert(jobQueue, { chunkX = chunkX, chunkZ = chunkZ })
-    end
-  end
-  saveState()
-end
-
-verifyConnections()
-
-local function clearScreen()
-  term.clear()
-  term.setCursorPos(1, 1)
-end
-
-local function drawGUI()
-  clearScreen()
-  print("=== GPS Chunk Mining Controller ===")
-  print(("Total chunks: %d  Completed: %d  Progress: %d%%"):format(
-    totalJobs, finishedCount, math.floor(finishedCount / totalJobs * 100)))
-  print("\nTurtles:")
-  for label, info in pairs(activeTasks) do
-    local status = info.status or "unknown"
-    if connected[label] == false then
-      status = status .. " [OFFLINE]"
-    end
-    local job = info.job or {}
-    local chunkDesc = "?"
-    if job.chunkX then
-      chunkDesc = ("C=(%d,%d)"):format(job.chunkX, job.chunkZ)
-    elseif job.x and job.z then
-      chunkDesc = ("legacy X=%d Z=%d"):format(job.x, job.z)
-    end
-    local actual = ""
-    if info.actualChunk then
-      actual = ("  actual C=(%d,%d)"):format(info.actualChunk.x, info.actualChunk.z)
-    end
-    print(('- %s: %s %s%s'):format(label, status, chunkDesc, actual))
-  end
-  for label,_ in pairs(labelToID) do
-    if not activeTasks[label] and not paused[label] then
-      local stat = connected[label] == false and "offline" or "idle"
-      print(('- %s: %s'):format(label, stat))
-    end
-  end
-  if next(paused) then
-    print("\nPaused (chest full):")
-    for label,_ in pairs(paused) do
-      print("  * "..label)
-    end
-    print("Type 'resume' to continue paused turtles.")
-  end
-  print("\nCommands: resume | setdepth <label> <maxDepth> | ping <label> | list | help")
-  print("Press ESC to enter command mode")
-end
-
-local function assignNext(label)
+local function assignJob(t)
+  if paused or not miningActive then return end
+  if t.job or not t.ready then return end
   if #jobQueue == 0 then return end
-  local job = table.remove(jobQueue, 1)
-  local id = labelToID[label]
-  if not id then return end
-  rednet.send(id, textutils.serialize({ event = "job", job = job }))
-  activeTasks[label] = { job = job, status = "mining" }
-  saveState()
+  local job = table.remove(jobQueue,1)
+  t.job = job
+  send(t.id, {event="job", job=job})
 end
 
-local function whoisBroadcaster()
-  while finishedCount < totalJobs do
-    rednet.broadcast(textutils.serialize({ event = "whois" }))
-    sleep(3)
+local function assignAll()
+  for _,t in pairs(turtles) do assignJob(t) end
+end
+
+local function drawMenu(selected)
+  term.clear()
+  term.setCursorPos(1,1)
+  print("Mining Controller")
+  print(string.format("Grid: %d x %d", chunksWide, chunksHigh))
+  print(string.format("Depth: %d", maxDepth))
+  local items = {
+    "Configure Grid Size",
+    "Set Mining Depth",
+    "Start Turtle",
+    "Start Mining",
+    "Pause Mining",
+    "Resume Mining",
+    "View Status"
+  }
+  for i,text in ipairs(items) do
+    if i==selected then print("> "..text) else print("  "..text) end
   end
+  print("\nUse arrow keys, Tab to select")
 end
 
-local function drawSelectionMenu(selected, labels)
-  clearScreen()
-  print("Select Turtle (ESC for command)")
-  for i,label in ipairs(labels) do
-    local prefix = (i == selected) and "> " or "  "
-    print(prefix .. label)
-  end
-  print("(Enter to open turtle menu, ESC for command)")
+local function readNumber(prompt)
+  term.clear()
+  term.setCursorPos(1,1)
+  print(prompt)
+  write("> ")
+  local v = tonumber(read())
+  return v
 end
 
-local function showTurtleMenu(label)
-  local options = { "Ping", "Resume" }
+local function configureGrid()
   local idx = 1
   while true do
-    clearScreen()
-    print("["..label.."] Options (ESC to back)")
+    term.clear()
+    term.setCursorPos(1,1)
+    print("Configure Grid Size")
+    local options = {"Width: "..chunksWide, "Height: "..chunksHigh}
     for i,opt in ipairs(options) do
-      local prefix = (i == idx) and "> " or "  "
-      print(prefix .. opt)
+      if i==idx then print("> "..opt) else print("  "..opt) end
     end
-    local _, key = os.pullEvent("key")
-    if key == keys.up then
-      idx = math.max(1, idx-1)
-    elseif key == keys.down then
-      idx = math.min(#options, idx+1)
-    elseif key == keys.enter then
-      if options[idx] == "Ping" and labelToID[label] then
-        rednet.send(labelToID[label], textutils.serialize({ event = "ping" }))
-      elseif options[idx] == "Resume" and labelToID[label] then
-        rednet.send(labelToID[label], "resume")
+    print("Tab to edit, Esc to back")
+    local _,key = os.pullEvent("key")
+    if key==keys.up then idx=math.max(1,idx-1)
+    elseif key==keys.down then idx=math.min(2,idx+1)
+    elseif key==keys.tab then
+      local val = readNumber("Enter number of chunks (e.g. 4):")
+      if val then if idx==1 then chunksWide=val else chunksHigh=val end end
+    elseif key==keys.escape then break end
+  end
+end
+
+local function setDepth()
+  local v = readNumber("Enter maximum shaft depth in blocks (e.g. 20):")
+  if v then maxDepth = v end
+end
+
+local function listTurtles()
+  local labels = {}
+  for l,_ in pairs(turtles) do table.insert(labels,l) end
+  table.sort(labels)
+  return labels
+end
+
+local function startTurtle()
+  local labels = listTurtles()
+  if #labels==0 then return end
+  local idx=1
+  while true do
+    term.clear()
+    term.setCursorPos(1,1)
+    print("Start Turtle")
+    for i,lbl in ipairs(labels) do
+      if i==idx then print("> "..lbl) else print("  "..lbl) end
+    end
+    print("Tab to start, Esc to back")
+    local _,key = os.pullEvent("key")
+    if key==keys.up then idx=math.max(1,idx-1)
+    elseif key==keys.down then idx=math.min(#labels,idx+1)
+    elseif key==keys.tab then
+      local t = turtles[labels[idx]]
+      if t then
+        send(t.id,{event="start"})
+        t.started=true
       end
       break
-    elseif key == keys.escape then
-      break
-    end
+    elseif key==keys.escape then break end
   end
 end
 
-local function executeCommand(line)
-  local cmd, rest = line:match("^(%S+)%s*(.*)$")
-  if cmd == "resume" then
-    for label,_ in pairs(paused) do
-      local id = labelToID[label]
-      if id then
-        rednet.send(id, "resume")
-        if activeTasks[label] then activeTasks[label].status = "resuming" end
-      end
-    end
-    paused = {}
-    saveState()
-  elseif cmd == "setdepth" then
-    local label, depth = rest:match("^(%S+)%s*(%d+)$")
-    if label and depth then
-      depth = tonumber(depth)
-      if labelToID[label] then
-        rednet.send(labelToID[label], textutils.serialize({ event = "set_depth", maxDepth = depth }))
-        activeTasks[label] = { job = { type = "depth", maxDepth = depth }, status = "mining" }
-        saveState()
-      else
-        print("Unknown turtle label: "..tostring(label))
-      end
-    else
-      print("Usage: setdepth <label> <maxDepth>")
-    end
-  elseif cmd == "ping" then
-    local label = rest:match("^(%S+)$")
-    if label and labelToID[label] then
-      rednet.send(labelToID[label], textutils.serialize({ event = "ping" }))
-    else
-      print("Unknown label; broadcasting ping.")
-      rednet.broadcast(textutils.serialize({ event = "ping" }))
-    end
-  elseif cmd == "list" then
-    print("Known turtles:")
-    for label,id in pairs(labelToID) do
-      local status = activeTasks[label] and activeTasks[label].status or (paused[label] and "paused" or "idle")
-      print(('- %s -> ID %s : %s'):format(label, tostring(id), status))
-    end
-  elseif cmd == "help" then
-    print("Commands: resume | setdepth <label> <maxDepth> | ping <label> | list | help")
-  end
+local function startMining()
+  buildJobs()
+  miningActive=true
+  assignAll()
 end
 
-local function keyboardLoop()
-  local mode = "menu"
-  local selected = 1
+local function pauseMining()
+  paused=true
+end
+
+local function resumeMining()
+  paused=false
+  assignAll()
+end
+
+local function viewStatus()
+  term.clear()
+  term.setCursorPos(1,1)
+  print("Status:")
+  for label,t in pairs(turtles) do
+    local job = t.job and string.format("(%d,%d)", t.job.chunkX, t.job.chunkZ) or "-"
+    local prog = t.progress and string.format("x=%d z=%d d=%d", t.progress.x, t.progress.z, t.progress.depth) or ""
+    local err = t.error or ""
+    print(string.format("%s : %s %s %s", label, job, prog, err))
+  end
+  print("\nPress any key")
+  os.pullEvent("key")
+end
+
+local actions = {configureGrid,setDepth,startTurtle,startMining,pauseMining,resumeMining,viewStatus}
+
+local function menuLoop()
+  local selected=1
   while true do
-    if mode == "menu" then
-      local labels = {}
-      for l,_ in pairs(labelToID) do table.insert(labels, l) end
-      table.sort(labels)
-      if #labels == 0 then labels = {"<none>"} end
-      if selected > #labels then selected = #labels end
-      if selected < 1 then selected = 1 end
-      suspendGUI = true
-      drawSelectionMenu(selected, labels)
-      local _, key = os.pullEvent("key")
-      suspendGUI = false
-      if key == keys.up then
-        selected = math.max(1, selected-1)
-      elseif key == keys.down then
-        selected = math.min(#labels, selected+1)
-      elseif key == keys.enter and labels[selected] and labels[selected] ~= "<none>" then
-        showTurtleMenu(labels[selected])
-      elseif key == keys.escape then
-        mode = "command"
-      end
-    else
-      suspendGUI = true
-      write("> ")
-      local line = read()
-      suspendGUI = false
-      if line then executeCommand(line) end
-      mode = "menu"
+    drawMenu(selected)
+    local _,key=os.pullEvent("key")
+    if key==keys.up then selected=math.max(1,selected-1)
+    elseif key==keys.down then selected=math.min(7,selected+1)
+    elseif key==keys.tab then actions[selected]()
     end
   end
 end
 
-local function networkLoop()
+local function netLoop()
   while true do
-    local senderId, msg = rednet.receive()
-    local ok, data = pcall(textutils.unserialize, msg)
-    if ok and type(data) == "table" then
-      if data.event == "hello" and data.sender then
-        labelToID[data.sender] = senderId
-        idToLabel[senderId] = data.sender
-        connected[data.sender] = true
-        if not activeTasks[data.sender] and not paused[data.sender] then
-          assignNext(data.sender)
-        end
-        saveState()
-      elseif data.event == "done" and data.sender then
-        local label = data.sender
-        finishedCount = finishedCount + 1
-        activeTasks[label] = nil
-        assignNext(label)
-        saveState()
-      elseif data.event == "chest_full" and data.sender then
-        paused[data.sender] = true
-        if activeTasks[data.sender] then activeTasks[data.sender].status = "paused" end
-        saveState()
-      elseif data.event == "error" and data.sender then
-        if activeTasks[data.sender] then
-          activeTasks[data.sender].status = "error:" .. (data.code or "unknown")
-        end
-        saveState()
-      elseif data.event == "pong" and data.sender then
-        connected[data.sender] = true
-        print(("Received pong from %s"):format(data.sender))
-      elseif data.event == "chunk_report" and data.sender then
-        local label = data.sender
-        if activeTasks[label] and activeTasks[label].job then
-          -- Store actual chunk
-          activeTasks[label].actualChunk = { x = data.actualChunkX, z = data.actualChunkZ }
-          -- Compare assigned vs actual
-          local assigned = activeTasks[label].job
-          if assigned.chunkX and assigned.chunkZ then
-            if assigned.chunkX ~= data.actualChunkX or assigned.chunkZ ~= data.actualChunkZ then
-              activeTasks[label].status = "misaligned"
-              print(("[WARN] Turtle %s assigned chunk (%d,%d) but reports being at (%d,%d)"):format(
-                label, assigned.chunkX, assigned.chunkZ, data.actualChunkX, data.actualChunkZ))
-            else
-              activeTasks[label].status = "on target"
-            end
-          end
-          saveState()
-        end
-      end
-    else
-      if msg == "done" then
-        local label = idToLabel[senderId]
-        if label then
-          finishedCount = finishedCount + 1
-          activeTasks[label] = nil
-          assignNext(label)
-          saveState()
-        end
+    local id,msg = rednet.receive()
+    local ok,data = pcall(textutils.unserialize,msg)
+    if ok and type(data)=="table" then
+      local label = data.sender or tostring(id)
+      if not turtles[label] then turtles[label]={id=id,label=label} end
+      local t = turtles[label]
+      t.id=id
+      if data.event=="hello" then
+        -- nothing extra
+      elseif data.event=="ready" then
+        t.ready=true
+        assignJob(t)
+      elseif data.event=="progress" then
+        t.progress={x=data.x,z=data.z,depth=data.depth}
+      elseif data.event=="done" then
+        t.job=nil
+        assignJob(t)
+      elseif data.event=="error" then
+        t.error=data.code
       end
     end
   end
 end
 
--- main loop
-parallel.waitForAny(
-  function()
-    while finishedCount < totalJobs do
-      if not suspendGUI then
-        drawGUI()
-      end
-      sleep(0.5)
-    end
-    drawGUI()
-    print("\nAll chunks completed.")
-    if fs.exists(STATE_FILE) then fs.delete(STATE_FILE) end
-  end,
-  keyboardLoop,
-  networkLoop,
-  whoisBroadcaster
-)
+parallel.waitForAny(menuLoop, netLoop)
