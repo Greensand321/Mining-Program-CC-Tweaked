@@ -32,7 +32,8 @@ local function sendEvent(event, extra)
   if extra then
     for k,v in pairs(extra) do payload[k] = v end
   end
-  rednet.send(0, textutils.serialize(payload))
+  -- send as a broadcast so the controller can always hear us
+  rednet.broadcast(textutils.serialize(payload))
 end
 
 local function saveState(state)
