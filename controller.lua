@@ -153,6 +153,7 @@ local function drawGUI()
     print("Type 'resume' to continue paused turtles.")
   end
   print("\nCommands: resume | setdepth <label> <maxDepth> | ping <label> | list | help")
+  print("Press ESC to enter command mode")
 end
 
 local function assignNext(label)
@@ -179,6 +180,7 @@ local function drawSelectionMenu(selected, labels)
     local prefix = (i == selected) and "> " or "  "
     print(prefix .. label)
   end
+  print("(Enter to open turtle menu, ESC for command)")
 end
 
 local function showTurtleMenu(label)
