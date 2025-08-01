@@ -23,6 +23,7 @@ local finishedCount = 0
 local labelToID = {}      -- label -> rednet ID
 local idToLabel = {}      -- rednet ID -> label
 local suspendGUI = false
+local connected = {}       -- label -> bool
 
 local totalJobs = chunksWide * chunksHigh
 
@@ -37,6 +38,30 @@ local function saveState()
     idToLabel = idToLabel,
   }))
   h.close()
+end
+
+local function verifyConnections()
+  if next(labelToID) == nil then return end
+  print("Verifying connected turtles...")
+  local awaiting = {}
+  for label, id in pairs(labelToID) do
+    awaiting[label] = true
+    rednet.send(id, textutils.serialize({ event = "ping" }))
+  end
+  local start = os.clock()
+  while next(awaiting) and os.clock() - start < 4 do
+    local sender, msg = rednet.receive(1)
+    if sender then
+      local ok, data = pcall(textutils.unserialize, msg)
+      if ok and type(data) == "table" and data.event == "pong" and data.sender then
+        connected[data.sender] = true
+        awaiting[data.sender] = nil
+      end
+    end
+  end
+  for label,_ in pairs(awaiting) do
+    connected[label] = false
+  end
 end
 
 local function loadState()
@@ -83,6 +108,8 @@ if not resumed then
   saveState()
 end
 
+verifyConnections()
+
 local function clearScreen()
   term.clear()
   term.setCursorPos(1, 1)
@@ -96,6 +123,9 @@ local function drawGUI()
   print("\nTurtles:")
   for label, info in pairs(activeTasks) do
     local status = info.status or "unknown"
+    if connected[label] == false then
+      status = status .. " [OFFLINE]"
+    end
     local job = info.job or {}
     local chunkDesc = "?"
     if job.chunkX then
@@ -111,7 +141,8 @@ local function drawGUI()
   end
   for label,_ in pairs(labelToID) do
     if not activeTasks[label] and not paused[label] then
-      print(('- %s: idle'):format(label))
+      local stat = connected[label] == false and "offline" or "idle"
+      print(('- %s: %s'):format(label, stat))
     end
   end
   if next(paused) then
@@ -141,56 +172,120 @@ local function whoisBroadcaster()
   end
 end
 
-local function keyboardLoop()
+local function drawSelectionMenu(selected, labels)
+  clearScreen()
+  print("Select Turtle (ESC for command)")
+  for i,label in ipairs(labels) do
+    local prefix = (i == selected) and "> " or "  "
+    print(prefix .. label)
+  end
+end
+
+local function showTurtleMenu(label)
+  local options = { "Ping", "Resume" }
+  local idx = 1
   while true do
-    suspendGUI = true
-    write("> ")
-    local line = read()
-    suspendGUI = false
-    if not line then goto cont end
-    local cmd, rest = line:match("^(%S+)%s*(.*)$")
-    if cmd == "resume" then
-      for label,_ in pairs(paused) do
-        local id = labelToID[label]
-        if id then
-          rednet.send(id, "resume")
-          if activeTasks[label] then activeTasks[label].status = "resuming" end
-        end
-      end
-      paused = {}
-      saveState()
-    elseif cmd == "setdepth" then
-      local label, depth = rest:match("^(%S+)%s*(%d+)$")
-      if label and depth then
-        depth = tonumber(depth)
-        if labelToID[label] then
-          rednet.send(labelToID[label], textutils.serialize({ event = "set_depth", maxDepth = depth }))
-          activeTasks[label] = { job = { type = "depth", maxDepth = depth }, status = "mining" }
-          saveState()
-        else
-          print("Unknown turtle label: "..tostring(label))
-        end
-      else
-        print("Usage: setdepth <label> <maxDepth>")
-      end
-    elseif cmd == "ping" then
-      local label = rest:match("^(%S+)$")
-      if label and labelToID[label] then
-        rednet.send(labelToID[label], textutils.serialize({ event = "ping" }))
-      else
-        print("Unknown label; broadcasting ping.")
-        rednet.broadcast(textutils.serialize({ event = "ping" }))
-      end
-    elseif cmd == "list" then
-      print("Known turtles:")
-      for label,id in pairs(labelToID) do
-        local status = activeTasks[label] and activeTasks[label].status or (paused[label] and "paused" or "idle")
-        print(('- %s -> ID %s : %s'):format(label, tostring(id), status))
-      end
-    elseif cmd == "help" then
-      print("Commands: resume | setdepth <label> <maxDepth> | ping <label> | list | help")
+    clearScreen()
+    print("["..label.."] Options (ESC to back)")
+    for i,opt in ipairs(options) do
+      local prefix = (i == idx) and "> " or "  "
+      print(prefix .. opt)
     end
-    ::cont::
+    local _, key = os.pullEvent("key")
+    if key == keys.up then
+      idx = math.max(1, idx-1)
+    elseif key == keys.down then
+      idx = math.min(#options, idx+1)
+    elseif key == keys.enter then
+      if options[idx] == "Ping" and labelToID[label] then
+        rednet.send(labelToID[label], textutils.serialize({ event = "ping" }))
+      elseif options[idx] == "Resume" and labelToID[label] then
+        rednet.send(labelToID[label], "resume")
+      end
+      break
+    elseif key == keys.escape then
+      break
+    end
+  end
+end
+
+local function executeCommand(line)
+  local cmd, rest = line:match("^(%S+)%s*(.*)$")
+  if cmd == "resume" then
+    for label,_ in pairs(paused) do
+      local id = labelToID[label]
+      if id then
+        rednet.send(id, "resume")
+        if activeTasks[label] then activeTasks[label].status = "resuming" end
+      end
+    end
+    paused = {}
+    saveState()
+  elseif cmd == "setdepth" then
+    local label, depth = rest:match("^(%S+)%s*(%d+)$")
+    if label and depth then
+      depth = tonumber(depth)
+      if labelToID[label] then
+        rednet.send(labelToID[label], textutils.serialize({ event = "set_depth", maxDepth = depth }))
+        activeTasks[label] = { job = { type = "depth", maxDepth = depth }, status = "mining" }
+        saveState()
+      else
+        print("Unknown turtle label: "..tostring(label))
+      end
+    else
+      print("Usage: setdepth <label> <maxDepth>")
+    end
+  elseif cmd == "ping" then
+    local label = rest:match("^(%S+)$")
+    if label and labelToID[label] then
+      rednet.send(labelToID[label], textutils.serialize({ event = "ping" }))
+    else
+      print("Unknown label; broadcasting ping.")
+      rednet.broadcast(textutils.serialize({ event = "ping" }))
+    end
+  elseif cmd == "list" then
+    print("Known turtles:")
+    for label,id in pairs(labelToID) do
+      local status = activeTasks[label] and activeTasks[label].status or (paused[label] and "paused" or "idle")
+      print(('- %s -> ID %s : %s'):format(label, tostring(id), status))
+    end
+  elseif cmd == "help" then
+    print("Commands: resume | setdepth <label> <maxDepth> | ping <label> | list | help")
+  end
+end
+
+local function keyboardLoop()
+  local mode = "menu"
+  local selected = 1
+  while true do
+    if mode == "menu" then
+      local labels = {}
+      for l,_ in pairs(labelToID) do table.insert(labels, l) end
+      table.sort(labels)
+      if #labels == 0 then labels = {"<none>"} end
+      if selected > #labels then selected = #labels end
+      if selected < 1 then selected = 1 end
+      suspendGUI = true
+      drawSelectionMenu(selected, labels)
+      local _, key = os.pullEvent("key")
+      suspendGUI = false
+      if key == keys.up then
+        selected = math.max(1, selected-1)
+      elseif key == keys.down then
+        selected = math.min(#labels, selected+1)
+      elseif key == keys.enter and labels[selected] and labels[selected] ~= "<none>" then
+        showTurtleMenu(labels[selected])
+      elseif key == keys.escape then
+        mode = "command"
+      end
+    else
+      suspendGUI = true
+      write("> ")
+      local line = read()
+      suspendGUI = false
+      if line then executeCommand(line) end
+      mode = "menu"
+    end
   end
 end
 
@@ -202,6 +297,7 @@ local function networkLoop()
       if data.event == "hello" and data.sender then
         labelToID[data.sender] = senderId
         idToLabel[senderId] = data.sender
+        connected[data.sender] = true
         if not activeTasks[data.sender] and not paused[data.sender] then
           assignNext(data.sender)
         end
@@ -222,6 +318,7 @@ local function networkLoop()
         end
         saveState()
       elseif data.event == "pong" and data.sender then
+        connected[data.sender] = true
         print(("Received pong from %s"):format(data.sender))
       elseif data.event == "chunk_report" and data.sender then
         local label = data.sender
