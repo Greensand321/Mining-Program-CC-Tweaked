@@ -31,6 +31,7 @@ rednet.open(modemSide)
 local haveTask = false
 local task = nil
 local orientation = nil  -- 0=+X,1=+Z,2=-X,3=-Z
+local running = true
 
 local function sendEvent(event, extra)
   local payload = { event = event, sender = label }
@@ -38,6 +39,24 @@ local function sendEvent(event, extra)
     for k,v in pairs(extra) do payload[k] = v end
   end
   rednet.broadcast(textutils.serialize(payload))
+end
+
+local function commandLoop()
+  while running do
+    write("(cmd)> ")
+    local line = read()
+    if not line then
+      sleep(0.1)
+    else
+      if line == "ping" then
+        sendEvent("ping")
+      elseif line == "reconnect" or line == "hello" then
+        sendEvent("hello")
+      elseif line == "help" then
+        print("Commands: ping | reconnect | help")
+      end
+    end
+  end
 end
 
 local function saveState(state)
@@ -229,6 +248,7 @@ local function round(n)
 end
 
 local function goToChunkCenter(chunkX, chunkZ)
+  print(string.format("Navigating to chunk (%d,%d)", chunkX, chunkZ))
   local targetX = chunkX * 16 + 8
   local targetZ = chunkZ * 16 + 8
   local tx,ty,tz = gps.locate(5)
@@ -259,6 +279,7 @@ local function goToChunkCenter(chunkX, chunkZ)
 end
 
 local function mineShaft(task, maxDepth)
+  print("Mining shaft...")
   local depth = task.depth or 0
   while true do
     if maxDepth and depth >= maxDepth then break end
@@ -288,6 +309,7 @@ end
 
 -- handshake broadcaster
 local function handshakeLoop()
+  print("Searching for controller...")
   while not haveTask do
     sendEvent("hello")
     sleep(3)
@@ -305,6 +327,7 @@ local function receiveLoop()
         task = data.job
         task.depth = task.depth or 0
         task.stage = "mining"
+        print("Received job from controller")
       elseif data.event == "set_depth" then
         haveTask = true
         task = { x = 0, z = 0, depth = 0, stage = "mining", maxDepth = data.maxDepth }
@@ -313,6 +336,7 @@ local function receiveLoop()
       elseif data.event == "resume" then
         -- will naturally continue if stalled
       elseif data.event == "ping" then
+        print("Ping received from controller")
         sendEvent("pong")
       end
     end
@@ -320,54 +344,61 @@ local function receiveLoop()
   end
 end
 
-parallel.waitForAny(handshakeLoop, receiveLoop)
+local function runTask()
+  parallel.waitForAny(handshakeLoop, receiveLoop)
 
-if not task then
-  print("No task received, aborting.")
-  return
-end
+  if not task then
+    print("No task received, aborting.")
+    running = false
+    return
+  end
 
-print("Starting task:", textutils.serialize(task))
-refuelIfNeeded()
+  print("Starting task:", textutils.serialize(task))
+  refuelIfNeeded()
 
--- Navigation: if chunk job provided, go to its center
-if task.chunkX and task.chunkZ then
-  -- move to chunk center
-  goToChunkCenter(task.chunkX, task.chunkZ)
-  -- build surface wall if desired
-  if BUILD_SURFACE_WALL then
-    -- requires a block in slot 1
-    turtle.select(1)
-    -- place perimeter around current position
-    for i = 1, 4 do
-      turtle.turnRight()
-      if not turtle.detect() then
-        turtle.place()
+  -- Navigation: if chunk job provided, go to its center
+  if task.chunkX and task.chunkZ then
+    -- move to chunk center
+    goToChunkCenter(task.chunkX, task.chunkZ)
+    -- build surface wall if desired
+    if BUILD_SURFACE_WALL then
+      turtle.select(1)
+      for i = 1, 4 do
+        turtle.turnRight()
+        if not turtle.detect() then
+          turtle.place()
+        end
       end
     end
+  else
+    -- legacy movement using relative x,z
+    if task.x and task.z then
+      turtle.turnRight() moveForwardN(task.x)
+      turtle.turnLeft() moveForwardN(task.z)
+    end
   end
-else
-  -- legacy movement using relative x,z
+
+  mineShaft(task, task.maxDepth)
+
+  print("Mining complete, returning to surface")
+
+  -- return to origin (best-effort)
   if task.x and task.z then
-    turtle.turnRight() moveForwardN(task.x)
-    turtle.turnLeft() moveForwardN(task.z)
+    turtle.turnLeft() turtle.turnLeft()
+    if task.z then moveForwardN(task.z) end
+    turtle.turnRight()
+    if task.x then moveForwardN(task.x) end
+    turtle.turnLeft()
   end
+
+  task.stage = "complete"
+  saveState(task)
+  clearState()
+  -- dump inventory before exit
+  dumpInventory(task)
+  sendEvent("done", { chunkX = task.chunkX, chunkZ = task.chunkZ })
+  print("Task complete. Notified controller.")
+  running = false
 end
 
-mineShaft(task, task.maxDepth)
-
--- return to origin (best-effort)
-if task.x and task.z then
-  turtle.turnLeft() turtle.turnLeft()
-  if task.z then moveForwardN(task.z) end
-  turtle.turnRight()
-  if task.x then moveForwardN(task.x) end
-  turtle.turnLeft()
-end
-
-task.stage = "complete"
-saveState(task)
-clearState()
--- dump inventory before exit
-dumpInventory(task)
-sendEvent("done", { chunkX = task.chunkX, chunkZ = task.chunkZ })
+parallel.waitForAny(runTask, commandLoop)
