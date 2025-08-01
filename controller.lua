@@ -10,8 +10,8 @@ end
 if not modemSide then error("No modem attached") end
 rednet.open(modemSide)
 
-local chunksWide, chunksHigh = 4, 4
-local maxDepth = 20
+local CHUNK_GRID_SIZE = 16
+local startDepth = 64
 local baseChunkX, baseChunkZ = 0, 0
 
 local turtles = {} -- label -> {id=, started=bool, ready=bool, job=table, progress=table, error=string}
@@ -25,9 +25,9 @@ end
 
 local function buildJobs()
   jobQueue = {}
-  for dz=0,chunksHigh-1 do
-    for dx=0,chunksWide-1 do
-      table.insert(jobQueue, {chunkX=baseChunkX+dx, chunkZ=baseChunkZ+dz, maxDepth=maxDepth})
+  for dz=0,CHUNK_GRID_SIZE-1 do
+    for dx=0,CHUNK_GRID_SIZE-1 do
+      table.insert(jobQueue, {chunkX=baseChunkX+dx, chunkZ=baseChunkZ+dz, startDepth=startDepth})
     end
   end
 end
@@ -49,11 +49,10 @@ local function drawMenu(selected)
   term.clear()
   term.setCursorPos(1,1)
   print("Mining Controller")
-  print(string.format("Grid: %d x %d", chunksWide, chunksHigh))
-  print(string.format("Depth: %d", maxDepth))
+  print(string.format("Grid: %d x %d", CHUNK_GRID_SIZE, CHUNK_GRID_SIZE))
+  print(string.format("Start Depth: %d", startDepth))
   local items = {
-    "Configure Grid Size",
-    "Set Mining Depth",
+    "Change Mining Start Depth",
     "Start Turtle",
     "Start Mining",
     "Pause Mining",
@@ -63,7 +62,7 @@ local function drawMenu(selected)
   for i,text in ipairs(items) do
     if i==selected then print("> "..text) else print("  "..text) end
   end
-  print("\nUse arrow keys, Tab to select")
+  print("\nUse \226\x86\x91/\226\x86\x93 to navigate, Enter to select")
 end
 
 local function readNumber(prompt)
@@ -75,30 +74,28 @@ local function readNumber(prompt)
   return v
 end
 
-local function configureGrid()
+local function changeStartDepth()
   local idx = 1
   while true do
     term.clear()
     term.setCursorPos(1,1)
-    print("Configure Grid Size")
-    local options = {"Width: "..chunksWide, "Height: "..chunksHigh}
+    print("Change Mining Start Depth")
+    local options = {"Enter New Start Depth (current: "..startDepth..")","Back"}
     for i,opt in ipairs(options) do
       if i==idx then print("> "..opt) else print("  "..opt) end
     end
-    print("Tab to edit, Esc to back")
-    local _,key = os.pullEvent("key")
+    local _,key=os.pullEvent("key")
     if key==keys.up then idx=math.max(1,idx-1)
     elseif key==keys.down then idx=math.min(2,idx+1)
-    elseif key==keys.tab then
-      local val = readNumber("Enter number of chunks (e.g. 4):")
-      if val then if idx==1 then chunksWide=val else chunksHigh=val end end
-    elseif key==keys.escape then break end
+    elseif key==keys.enter then
+      if idx==1 then
+        local v=readNumber("Enter starting elevation (e.g. 64):")
+        if v then startDepth=v end
+      else
+        return
+      end
+    elseif key==keys.backspace then return end
   end
-end
-
-local function setDepth()
-  local v = readNumber("Enter maximum shaft depth in blocks (e.g. 20):")
-  if v then maxDepth = v end
 end
 
 local function listTurtles()
@@ -110,60 +107,124 @@ end
 
 local function startTurtle()
   local labels = listTurtles()
-  if #labels==0 then return end
+  local options = {"Back"}
+  for _,l in ipairs(labels) do table.insert(options,l) end
   local idx=1
   while true do
     term.clear()
     term.setCursorPos(1,1)
     print("Start Turtle")
-    for i,lbl in ipairs(labels) do
-      if i==idx then print("> "..lbl) else print("  "..lbl) end
+    for i,opt in ipairs(options) do
+      if i==idx then print("> "..opt) else print("  "..opt) end
     end
-    print("Tab to start, Esc to back")
-    local _,key = os.pullEvent("key")
+    local _,key=os.pullEvent("key")
     if key==keys.up then idx=math.max(1,idx-1)
-    elseif key==keys.down then idx=math.min(#labels,idx+1)
-    elseif key==keys.tab then
-      local t = turtles[labels[idx]]
+    elseif key==keys.down then idx=math.min(#options,idx+1)
+    elseif key==keys.enter then
+      if idx==1 then return end
+      local t=turtles[options[idx]]
       if t then
         send(t.id,{event="start"})
         t.started=true
       end
-      break
-    elseif key==keys.escape then break end
+      return
+    elseif key==keys.backspace then return end
   end
 end
 
 local function startMining()
-  buildJobs()
-  miningActive=true
-  assignAll()
+  local idx=1
+  while true do
+    term.clear()
+    term.setCursorPos(1,1)
+    print("Start Mining")
+    local opts={"Back","Confirm Start Mining"}
+    for i,opt in ipairs(opts) do
+      if i==idx then print("> "..opt) else print("  "..opt) end
+    end
+    local _,key=os.pullEvent("key")
+    if key==keys.up then idx=math.max(1,idx-1)
+    elseif key==keys.down then idx=math.min(#opts,idx+1)
+    elseif key==keys.enter then
+      if idx==1 then return end
+      buildJobs()
+      miningActive=true
+      for _,t in pairs(turtles) do
+        if t.started then send(t.id,{event="start_mining"}) end
+      end
+      assignAll()
+      viewStatus(true)
+      return
+    elseif key==keys.backspace then return end
+  end
 end
 
 local function pauseMining()
-  paused=true
+  local idx=1
+  while true do
+    term.clear()
+    term.setCursorPos(1,1)
+    print("Pause Mining")
+    local opts={"Back","Confirm Pause"}
+    for i,opt in ipairs(opts) do
+      if i==idx then print("> "..opt) else print("  "..opt) end
+    end
+    local _,key=os.pullEvent("key")
+    if key==keys.up then idx=math.max(1,idx-1)
+    elseif key==keys.down then idx=math.min(#opts,idx+1)
+    elseif key==keys.enter then
+      if idx==1 then return else paused=true return end
+    elseif key==keys.backspace then return end
+  end
 end
 
 local function resumeMining()
-  paused=false
-  assignAll()
-end
-
-local function viewStatus()
-  term.clear()
-  term.setCursorPos(1,1)
-  print("Status:")
-  for label,t in pairs(turtles) do
-    local job = t.job and string.format("(%d,%d)", t.job.chunkX, t.job.chunkZ) or "-"
-    local prog = t.progress and string.format("x=%d z=%d d=%d", t.progress.x, t.progress.z, t.progress.depth) or ""
-    local err = t.error or ""
-    print(string.format("%s : %s %s %s", label, job, prog, err))
+  local idx=1
+  while true do
+    term.clear()
+    term.setCursorPos(1,1)
+    print("Resume Mining")
+    local opts={"Back","Confirm Resume"}
+    for i,opt in ipairs(opts) do
+      if i==idx then print("> "..opt) else print("  "..opt) end
+    end
+    local _,key=os.pullEvent("key")
+    if key==keys.up then idx=math.max(1,idx-1)
+    elseif key==keys.down then idx=math.min(#opts,idx+1)
+    elseif key==keys.enter then
+      if idx==1 then return else paused=false assignAll() return end
+    elseif key==keys.backspace then return end
   end
-  print("\nPress any key")
-  os.pullEvent("key")
 end
 
-local actions = {configureGrid,setDepth,startTurtle,startMining,pauseMining,resumeMining,viewStatus}
+local function viewStatus(loop)
+  local idx=1
+  while true do
+    term.clear()
+    term.setCursorPos(1,1)
+    print("Status:")
+    for label,t in pairs(turtles) do
+      local job=t.job and string.format("(%d,%d)",t.job.chunkX,t.job.chunkZ) or "-"
+      local prog=t.progress and string.format("x=%d z=%d d=%d",t.progress.x,t.progress.z,t.progress.depth) or ""
+      local err=t.error or ""
+      print(string.format("%s : %s %s %s",label,job,prog,err))
+    end
+    local opts={"Back","Refresh Status"}
+    for i,opt in ipairs(opts) do
+      if i==idx then print("> "..opt) else print("  "..opt) end
+    end
+    local _,key=os.pullEvent("key")
+    if key==keys.up then idx=math.max(1,idx-1)
+    elseif key==keys.down then idx=math.min(#opts,idx+1)
+    elseif key==keys.enter then
+      if idx==1 then return elseif idx==2 then -- refresh
+      end
+    elseif key==keys.backspace then return end
+    if not loop then return end
+  end
+end
+
+local actions = {changeStartDepth,startTurtle,startMining,pauseMining,resumeMining,viewStatus}
 
 local function menuLoop()
   local selected=1
@@ -171,9 +232,8 @@ local function menuLoop()
     drawMenu(selected)
     local _,key=os.pullEvent("key")
     if key==keys.up then selected=math.max(1,selected-1)
-    elseif key==keys.down then selected=math.min(7,selected+1)
-    elseif key==keys.tab then actions[selected]()
-    end
+    elseif key==keys.down then selected=math.min(6,selected+1)
+    elseif key==keys.enter then actions[selected]() end
   end
 end
 
