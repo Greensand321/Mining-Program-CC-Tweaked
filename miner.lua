@@ -22,28 +22,34 @@ send({event="hello"})
 
 local started=false
 local job=nil
+local mining=false
 
 -- wait for start command
 while not started do
-  local _,msg = rednet.receive()
-  local ok,data = pcall(textutils.unserialize,msg)
+  local _,msg=rednet.receive()
+  local ok,data=pcall(textutils.unserialize,msg)
   if msg=="start" or (ok and data.event=="start") then
     started=true
     send({event="ready"})
   end
 end
 
--- wait for job assignment
-while not job do
+-- wait for job and start_mining signal
+while not (job and mining) do
   local _,msg=rednet.receive()
   local ok,data=pcall(textutils.unserialize,msg)
-  if ok and type(data)=="table" and data.event=="job" and data.job then
-    job=data.job
+  if ok and type(data)=="table" then
+    if data.event=="job" and data.job then
+      job=data.job
+    elseif data.event=="start_mining" then
+      mining=true
+      send({event="ack_start_mining"})
+    end
   end
 end
 
 local chunkX,chunkZ=max or 0,0
-local maxDepth=job.maxDepth or 20
+local maxDepth = job.startDepth or job.maxDepth or 20
 chunkX,chunkZ=job.chunkX or 0, job.chunkZ or 0
 
 -- helpers for movement
