@@ -1,7 +1,7 @@
--- controller.lua (improved)
+-- Updated controller.lua: GPS chunk-anchored job queue with fallback manual origin
+
 local STATE_FILE = "controller_state.txt"
-local shaftsWide, shaftsLong, shaftSpacing = 4, 4, 3
-local totalJobs = shaftsWide * shaftsLong
+local chunksWide, chunksHigh = 4, 4  -- adjustable grid size in chunks
 
 -- find modem
 local modemSide
@@ -15,14 +15,16 @@ end
 if not modemSide then error("No modem attached") end
 rednet.open(modemSide)
 
--- state
+-- state containers
 local jobQueue = {}
-local activeTasks = {}    -- label -> { job=..., status=... }
+local activeTasks = {}    -- label -> { job=..., status=..., actualChunk=... }
 local paused = {}         -- label -> true
 local finishedCount = 0
 local labelToID = {}      -- label -> rednet ID
 local idToLabel = {}      -- rednet ID -> label
 local suspendGUI = false
+
+local totalJobs = chunksWide * chunksHigh
 
 local function saveState()
   local h = fs.open(STATE_FILE, "w")
@@ -52,12 +54,30 @@ local function loadState()
   return true
 end
 
--- initialize
+-- initialize job queue with GPS-based chunk origin or manual fallback
 local resumed = loadState()
 if not resumed then
-  for z = 0, shaftsLong - 1 do
-    for x = 0, shaftsWide - 1 do
-      table.insert(jobQueue, { x = x * shaftSpacing, z = z * shaftSpacing })
+  local baseChunkX, baseChunkZ
+  local x,y,z = gps.locate(5)
+  if x then
+    baseChunkX = math.floor(x / 16)
+    baseChunkZ = math.floor(z / 16)
+    print(("Controller GPS located at chunk (%d, %d)"):format(baseChunkX, baseChunkZ))
+  else
+    print("WARNING: GPS locate failed. Please input base chunk coordinates manually.")
+    write("Base chunk X: ")
+    baseChunkX = tonumber(read())
+    write("Base chunk Z: ")
+    baseChunkZ = tonumber(read())
+    if not baseChunkX or not baseChunkZ then
+      error("Invalid manual chunk origin")
+    end
+  end
+  for dz = 0, chunksHigh - 1 do
+    for dx = 0, chunksWide - 1 do
+      local chunkX = baseChunkX + dx
+      local chunkZ = baseChunkZ + dz
+      table.insert(jobQueue, { chunkX = chunkX, chunkZ = chunkZ })
     end
   end
   saveState()
@@ -70,18 +90,28 @@ end
 
 local function drawGUI()
   clearScreen()
-  print("=== Mining Grid Controller ===")
-  print(("Total shafts: %d  Completed: %d  Progress: %d%%"):format(
+  print("=== GPS Chunk Mining Controller ===")
+  print(("Total chunks: %d  Completed: %d  Progress: %d%%"):format(
     totalJobs, finishedCount, math.floor(finishedCount / totalJobs * 100)))
   print("\nTurtles:")
   for label, info in pairs(activeTasks) do
     local status = info.status or "unknown"
     local job = info.job or {}
-    print(("- %s: %s (X=%d Z=%d)"):format(label, status, job.x or -1, job.z or -1))
+    local chunkDesc = "?"
+    if job.chunkX then
+      chunkDesc = ("C=(%d,%d)"):format(job.chunkX, job.chunkZ)
+    elseif job.x and job.z then
+      chunkDesc = ("legacy X=%d Z=%d"):format(job.x, job.z)
+    end
+    local actual = ""
+    if info.actualChunk then
+      actual = ("  actual C=(%d,%d)"):format(info.actualChunk.x, info.actualChunk.z)
+    end
+    print(('- %s: %s %s%s'):format(label, status, chunkDesc, actual))
   end
   for label,_ in pairs(labelToID) do
     if not activeTasks[label] and not paused[label] then
-      print(("- %s: idle"):format(label))
+      print(('- %s: idle'):format(label))
     end
   end
   if next(paused) then
@@ -104,7 +134,6 @@ local function assignNext(label)
   saveState()
 end
 
--- whois to prompt turtles
 local function whoisBroadcaster()
   while finishedCount < totalJobs do
     rednet.broadcast(textutils.serialize({ event = "whois" }))
@@ -156,7 +185,7 @@ local function keyboardLoop()
       print("Known turtles:")
       for label,id in pairs(labelToID) do
         local status = activeTasks[label] and activeTasks[label].status or (paused[label] and "paused" or "idle")
-        print(("- %s -> ID %s : %s"):format(label, tostring(id), status))
+        print(('- %s -> ID %s : %s'):format(label, tostring(id), status))
       end
     elseif cmd == "help" then
       print("Commands: resume | setdepth <label> <maxDepth> | ping <label> | list | help")
@@ -171,7 +200,6 @@ local function networkLoop()
     local ok, data = pcall(textutils.unserialize, msg)
     if ok and type(data) == "table" then
       if data.event == "hello" and data.sender then
-        -- new turtle or re-announce
         labelToID[data.sender] = senderId
         idToLabel[senderId] = data.sender
         if not activeTasks[data.sender] and not paused[data.sender] then
@@ -195,6 +223,24 @@ local function networkLoop()
         saveState()
       elseif data.event == "pong" and data.sender then
         print(("Received pong from %s"):format(data.sender))
+      elseif data.event == "chunk_report" and data.sender then
+        local label = data.sender
+        if activeTasks[label] and activeTasks[label].job then
+          -- Store actual chunk
+          activeTasks[label].actualChunk = { x = data.actualChunkX, z = data.actualChunkZ }
+          -- Compare assigned vs actual
+          local assigned = activeTasks[label].job
+          if assigned.chunkX and assigned.chunkZ then
+            if assigned.chunkX ~= data.actualChunkX or assigned.chunkZ ~= data.actualChunkZ then
+              activeTasks[label].status = "misaligned"
+              print(("[WARN] Turtle %s assigned chunk (%d,%d) but reports being at (%d,%d)"):format(
+                label, assigned.chunkX, assigned.chunkZ, data.actualChunkX, data.actualChunkZ))
+            else
+              activeTasks[label].status = "on target"
+            end
+          end
+          saveState()
+        end
       end
     else
       if msg == "done" then
@@ -210,7 +256,7 @@ local function networkLoop()
   end
 end
 
--- main
+-- main loop
 parallel.waitForAny(
   function()
     while finishedCount < totalJobs do
@@ -220,7 +266,7 @@ parallel.waitForAny(
       sleep(0.5)
     end
     drawGUI()
-    print("\nAll shafts completed.")
+    print("\nAll chunks completed.")
     if fs.exists(STATE_FILE) then fs.delete(STATE_FILE) end
   end,
   keyboardLoop,
