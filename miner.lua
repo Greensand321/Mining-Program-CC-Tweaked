@@ -1,4 +1,4 @@
--- miner.lua (with bedrock detection, auto handshake retry, and structured messaging)
+-- miner.lua (with bedrock detection, automatic handshake retry, ping/pong, structured messaging, dumping/resume)
 
 local STATE_FILE = "state.txt"
 local FUEL_SLOT = 16
@@ -44,9 +44,12 @@ end
 local function loadState()
   if not fs.exists(STATE_FILE) then return nil end
   local h = fs.open(STATE_FILE, "r")
-  local data = textutils.unserialize(h.readAll())
+  local ok, data = pcall(textutils.unserialize, h.readAll())
   h.close()
-  return data
+  if ok and type(data) == "table" then
+    return data
+  end
+  return nil
 end
 
 local function clearState()
@@ -188,7 +191,7 @@ local function mineShaft(task, maxDepth)
   for i = 1, depth do turtle.up() end
 end
 
--- load persisted state if any
+-- recover if was mid-dump
 local persisted = loadState()
 if persisted and persisted.stage == "dumping" then
   task = persisted
@@ -196,7 +199,7 @@ if persisted and persisted.stage == "dumping" then
   dumpInventory(task)
 end
 
--- advertise presence until task arrives
+-- handshake broadcaster
 local function handshakeLoop()
   while not haveTask do
     sendEvent("hello")
@@ -204,6 +207,7 @@ local function handshakeLoop()
   end
 end
 
+-- message receiver
 local function receiveLoop()
   while true do
     local _, msg = rednet.receive()
@@ -220,24 +224,22 @@ local function receiveLoop()
       elseif data.event == "whois" then
         sendEvent("hello")
       elseif data.event == "resume" then
-        -- no-op; will continue
+        -- will naturally continue if stalled
+      elseif data.event == "ping" then
+        sendEvent("pong")
       end
     end
     if haveTask then break end
   end
 end
 
-parallel.waitForAny(
-  function() handshakeLoop() end,
-  function() receiveLoop() end
-)
+parallel.waitForAny(handshakeLoop, receiveLoop)
 
 if not task then
   print("No task received, aborting.")
   return
 end
 
--- start mining
 print("Starting task:", textutils.serialize(task))
 refuelIfNeeded()
 if task.x and task.z then
@@ -246,7 +248,7 @@ if task.x and task.z then
 end
 mineShaft(task, task.maxDepth)
 
--- return to origin
+-- return home
 turtle.turnLeft() turtle.turnLeft()
 if task.z then moveForwardN(task.z) end
 turtle.turnRight()
