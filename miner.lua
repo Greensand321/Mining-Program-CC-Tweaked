@@ -58,6 +58,20 @@ local function commandLoop()
     end
   end
 end
+local function locationLoop()
+  while running do
+    local x,y,z = gps.locate(2)
+    term.setCursorPos(1,1)
+    term.clearLine()
+    if x then
+      term.write(string.format("Pos: %.1f %.1f %.1f | C=(%d,%d)", x, y, z, math.floor(x/16), math.floor(z/16)))
+    else
+      term.write("Pos: ??? (no GPS)")
+    end
+    sleep(1)
+  end
+end
+
 
 local function saveState(state)
   local h = fs.open(STATE_FILE, "w")
@@ -310,6 +324,7 @@ end
 -- handshake broadcaster
 local function handshakeLoop()
   print("Searching for controller...")
+  term.setCursorPos(1,2)
   while not haveTask do
     sendEvent("hello")
     sleep(3)
@@ -347,6 +362,7 @@ end
 local function runTask()
   parallel.waitForAny(handshakeLoop, receiveLoop)
 
+  term.setCursorPos(1,2)
   if not task then
     print("No task received, aborting.")
     running = false
@@ -401,4 +417,4 @@ local function runTask()
   running = false
 end
 
-parallel.waitForAny(runTask, commandLoop)
+parallel.waitForAny(runTask, commandLoop, locationLoop)
