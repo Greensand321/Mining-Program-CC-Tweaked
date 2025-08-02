@@ -9,7 +9,10 @@ Each job corresponds to the centre of a 16×16 chunk, producing a 15×15 shaft.
 ## Basic usage
 1. Attach a modem to the computer and each turtle and set unique labels for every turtle.
 2. Run `controller.lua` on the computer and `miner.lua` on each turtle.
-3. Use the controller's menu (↑/↓ and Enter) to start turtles and begin mining.
+3. When the controller starts it attempts to locate itself with GPS. If that fails
+   it will ask for the base chunk **X** and **Z** coordinates manually. Enter the
+   chunk containing the top-left corner of your mining grid.
+4. Use the controller's menu (↑/↓ and Enter) to start turtles and begin mining.
 
 ### Controller Menu
 1. Change Mining Start Depth
@@ -20,6 +23,5 @@ Each job corresponds to the centre of a 16×16 chunk, producing a 15×15 shaft.
 6. View Status
 
 Press **Backspace** to return from sub‑menus.
+Press **ESC** only when entering controller commands; turtles work automatically.
 
-### Turtle display
-Each turtle now shows its current GPS coordinates and chunk position on the first line of its display.
