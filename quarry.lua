@@ -41,39 +41,6 @@ local function dropNotFuel()
  turtle.select(1)
 end --function
 
-local function fillFuelStack()
- local slot
- for i=1,16 do
-  turtle.select(i)
-  if turtle.getItemCount(i) > 0 and turtle.refuel(0) then
-   slot = i
-   break
-  end --if
- end --for
- if not slot then
-  turtle.select(1)
-  if not turtle.suck(64) then
-   turtle.select(1)
-   return false
-  end --if
-  if not turtle.refuel(0) then
-   turtle.drop()
-   turtle.select(1)
-   return false
-  end --if
-  slot = 1
- end --if
- turtle.select(slot)
- while turtle.getItemCount(slot) < 64 do
-  if not turtle.suck(64 - turtle.getItemCount(slot)) then
-   turtle.select(1)
-   return false
-  end --if
- end --while
- turtle.select(1)
- return true
-end --function
-
 local function refuelFromChest()
  for x=1,16 do
   turtle.select(x)
@@ -93,6 +60,20 @@ local function refuelFromChest()
  end --if
  turtle.select(1)
  return false
+end --function
+
+local function fillFuelStack()
+ for i=1,16 do
+  turtle.select(i)
+  if turtle.refuel(0) then
+   local need = 64 - turtle.getItemCount(i)
+   if need > 0 then
+    turtle.suck(need)
+   end --if
+   break
+  end --if
+ end --for
+ turtle.select(1)
 end --function
 
 
@@ -136,9 +117,7 @@ while not done and not dig.isStuck() do
    sleep(1)
   end --if
  end --while
- while not fillFuelStack() do
-  sleep(1)
- end --while
+ fillFuelStack()
  flex.send("Thanks!",colors.lime)
  dig.goto(loc)
 end --if
@@ -183,13 +162,11 @@ end --if
  end --if/else
  
  if turtle.getItemCount(15) > 0 then
- loc = dig.location()
+  loc = dig.location()
  dig.goto(0,0,0,180)
  dropNotFuel()
  refuelFromChest()
- while not fillFuelStack() do
-  sleep(1)
- end --while
+ fillFuelStack()
  dig.goto(loc)
 end --if
  
