@@ -10,9 +10,25 @@ end
 if not modemSide then error("No modem attached") end
 rednet.open(modemSide)
 
-local CHUNK_GRID_SIZE = 16
+local chunksWide = 4
+local chunksHigh = 4
 local startDepth = 64
-local baseChunkX, baseChunkZ = 0, 0
+local baseChunkX, baseChunkZ
+
+-- try to determine our chunk via GPS, otherwise ask for manual input
+local gx, _, gz = gps.locate(3)
+if gx then
+  baseChunkX = math.floor(gx / 16)
+  baseChunkZ = math.floor(gz / 16)
+  print(string.format("Controller GPS located at chunk (%d,%d)", baseChunkX, baseChunkZ))
+else
+  print("WARNING: GPS locate failed. Please input base chunk coordinates manually.")
+  write("Base chunk X: ")
+  baseChunkX = tonumber(read())
+  write("Base chunk Z: ")
+  baseChunkZ = tonumber(read())
+  if not baseChunkX or not baseChunkZ then error("Invalid manual chunk origin") end
+end
 
 local turtles = {} -- label -> {id=, started=bool, ready=bool, job=table, progress=table, error=string}
 local jobQueue = {}
@@ -25,9 +41,13 @@ end
 
 local function buildJobs()
   jobQueue = {}
-  for dz=0,CHUNK_GRID_SIZE-1 do
-    for dx=0,CHUNK_GRID_SIZE-1 do
-      table.insert(jobQueue, {chunkX=baseChunkX+dx, chunkZ=baseChunkZ+dz, startDepth=startDepth})
+  for dz = 0, chunksHigh - 1 do
+    for dx = 0, chunksWide - 1 do
+      table.insert(jobQueue, {
+        chunkX = baseChunkX + dx,
+        chunkZ = baseChunkZ + dz,
+        startDepth = startDepth
+      })
     end
   end
 end
@@ -49,7 +69,7 @@ local function drawMenu(selected)
   term.clear()
   term.setCursorPos(1,1)
   print("Mining Controller")
-  print(string.format("Grid: %d x %d", CHUNK_GRID_SIZE, CHUNK_GRID_SIZE))
+  print(string.format("Grid: %d x %d", chunksWide, chunksHigh))
   print(string.format("Start Depth: %d", startDepth))
   local items = {
     "Change Mining Start Depth",
@@ -63,6 +83,7 @@ local function drawMenu(selected)
     if i==selected then print("> "..text) else print("  "..text) end
   end
   print("\nUse \226\x86\x91/\226\x86\x93 to navigate, Enter to select")
+  print("Press ESC only for controller commands. Turtles work automatically.")
 end
 
 local function readNumber(prompt)
@@ -247,9 +268,10 @@ local function netLoop()
       local t = turtles[label]
       t.id=id
       if data.event=="hello" then
-        -- nothing extra
+        t.ready = true
+        assignJob(t)
       elseif data.event=="ready" then
-        t.ready=true
+        t.ready = true
         assignJob(t)
       elseif data.event=="progress" then
         t.progress={x=data.x,z=data.z,depth=data.depth}
