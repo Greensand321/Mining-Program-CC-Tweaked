@@ -84,44 +84,52 @@ local function fillFuelStack()
 end --function
 
 local function refuelFromChest()
- for x=1,16 do
-  turtle.select(x)
-  if turtle.refuel(1) then
-   turtle.select(1)
-   return true
-  end --if
- end --for
- turtle.select(1)
- if turtle.suck(1) then
-  if turtle.refuel(1) then
-   turtle.select(1)
-   return true
-  else
-   turtle.drop()
-  end --if
- end --if
- turtle.select(1)
- return false
-end --function
+  -- try refueling from what's already in inventory
+  for x = 1, 16 do
+    turtle.select(x)
+    if turtle.refuel(1) then
+      turtle.select(1)
+      return true
+    end
+  end
 
-local function fillFuelStack()
- for i=1,16 do
-  turtle.select(i)
-  if turtle.refuel(0) then
-   local need = 64 - turtle.getItemCount(i)
-   if need > 0 then
-    turtle.suck(need)
-   end --if
-   turtle.select(1)
-   return true
-  end --if
- end --for
- turtle.select(1)
- return false
-end --function
+  -- attempt to grab a full stack into an empty slot
+  for x = 1, 16 do
+    turtle.select(x)
+    if turtle.getItemCount(x) == 0 then
+      if turtle.suck(64) then
+        if turtle.refuel(0) then
+          turtle.select(1)
+          return true
+        else
+          turtle.drop()
+        end
+      end
+    end
+  end
+
+  -- last resort: single item
+  turtle.select(1)
+  if turtle.suck(1) and turtle.refuel(1) then
+    turtle.select(1)
+    return true
+  end
+
+  turtle.select(1)
+  return false
+end
+
+local function fuelNeededToReturn()
+  local dx = math.abs(dig.getx())
+  local dy = math.abs(dig.gety())
+  local dz = math.abs(dig.getz())
+  local base = dx + dy + dz
+  local buffer = 5
+  return base + buffer
+end
 
 
-local a,b,c,x,y,z,r,loc
+local loc
 local xdir, zdir = 1, 1
 dig.gotox(0)
 dig.gotoz(0)
@@ -153,25 +161,9 @@ while not done and not dig.isStuck() do
   break
  end
 
- a = turtle.getFuelLevel()-1
- b = math.abs(dig.getx())
-   + math.abs(dig.gety())
-   + math.abs(dig.getz())*2
- c = true
- while a <= b and c do
-  for x=1,16 do
-   turtle.select(x)
-   if turtle.refuel(1) then
-    break
-   end --if
-   if x == 16 then
-    c = false
-   end --if
-  end --for
-  a = turtle.getFuelLevel()-1
- end --while
- 
-  if a <= b then
+  local fuelLevel = turtle.getFuelLevel() - 1
+  local required = fuelNeededToReturn()
+  if fuelLevel <= required then
    loc = dig.location()
    flex.send("Fuel low; returning to base", colors.yellow)
    dig.gotoy(home.y)
@@ -179,7 +171,7 @@ while not done and not dig.isStuck() do
    dropNotFuel()
    refuelFromChest()
    flex.send("Waiting for fuel...", colors.orange)
-   while turtle.getFuelLevel() - 1 <= b do
+   while turtle.getFuelLevel() - 1 <= required do
      if not refuelFromChest() then
        sleep(1)
      end
@@ -193,7 +185,7 @@ while not done and not dig.isStuck() do
    dig.goto(loc)
   end
 
-turtle.select(1)
+ turtle.select(1)
  
  if zdir == 1 then
   dig.gotor(0)
