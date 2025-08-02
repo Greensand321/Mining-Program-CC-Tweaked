@@ -12,6 +12,7 @@ if not modemSide then error("No modem attached") end
 rednet.open(modemSide)
 
 print("[miner.lua] Awaiting start command from controller…")
+print("Type 'manual' and press Enter for manual override")
 
 local function send(tbl)
   tbl.sender = label
@@ -23,34 +24,82 @@ send({event="hello"})
 local started=false
 local job=nil
 local mining=false
+local controllerLog={}
+local LOG_LIMIT=20
 
--- wait for start command
-while not started do
-  local _,msg=rednet.receive()
-  local ok,data=pcall(textutils.unserialize,msg)
-  if msg=="start" or (ok and data.event=="start") then
-    started=true
-    send({event="ready"})
-  end
+local function logMsg(msg)
+  table.insert(controllerLog,msg)
+  if #controllerLog>LOG_LIMIT then table.remove(controllerLog,1) end
 end
 
--- wait for job and start_mining signal
-while not (job and mining) do
-  local _,msg=rednet.receive()
-  local ok,data=pcall(textutils.unserialize,msg)
-  if ok and type(data)=="table" then
-    if data.event=="job" and data.job then
-      job=data.job
-    elseif data.event=="start_mining" then
-      mining=true
-      send({event="ack_start_mining"})
+local function netLoop()
+  while true do
+    local _,msg=rednet.receive()
+    logMsg(msg)
+    local ok,data=pcall(textutils.unserialize,msg)
+    if msg=="start" or (ok and data and data.event=="start") then
+      if not started then
+        started=true
+        send({event="ready"})
+        print("Connection to controller established")
+      end
+    elseif ok and type(data)=="table" then
+      if data.event=="job" and data.job then
+        job=data.job
+      elseif data.event=="start_mining" then
+        mining=true
+        send({event="ack_start_mining"})
+      end
     end
   end
 end
 
-local chunkX,chunkZ=max or 0,0
-local maxDepth = job.startDepth or job.maxDepth or 20
-chunkX,chunkZ=job.chunkX or 0, job.chunkZ or 0
+local manualCommands={
+  forward=turtle.forward,
+  back=turtle.back,
+  up=turtle.up,
+  down=turtle.down,
+  turnLeft=turtle.turnLeft,
+  turnRight=turtle.turnRight,
+  dig=turtle.dig,
+  digUp=turtle.digUp,
+  digDown=turtle.digDown,
+  place=turtle.place
+}
+
+local commandNames={}
+for k,_ in pairs(manualCommands) do table.insert(commandNames,k) end
+table.sort(commandNames)
+
+local function manualMode()
+  while true do
+    term.clear()
+    term.setCursorPos(1,1)
+    print("Manual mode - type 'exit' to return")
+    print("Commands: "..table.concat(commandNames,", "))
+    print("\nController log:")
+    for i=math.max(1,#controllerLog-9),#controllerLog do
+      print(controllerLog[i])
+    end
+    write("> ")
+    local cmd=read()
+    if cmd=="exit" then term.clear() return end
+    local f=manualCommands[cmd]
+    if f then pcall(f) else print("Unknown command") sleep(1) end
+  end
+end
+
+local function inputLoop()
+  while true do
+    local line=read()
+    if line=="manual" then manualMode() end
+  end
+end
+
+local function mineChunk()
+  local chunkX = job.chunkX or 0
+  local chunkZ = job.chunkZ or 0
+  local maxDepth = job.startDepth or job.maxDepth or 20
 
 -- helpers for movement
 local facing=0 --0 east,1 south,2 west,3 north
@@ -174,5 +223,14 @@ end
 
 dumpInventory()
 fs.delete(STATE_FILE)
-send({event="done"})
-print("Chunk complete")
+  send({event="done"})
+  print("Chunk complete")
+end
+
+local function main()
+  while not started do sleep(0.1) end
+  while not (job and mining) do sleep(0.1) end
+  mineChunk()
+end
+
+parallel.waitForAny(main, netLoop, inputLoop)
