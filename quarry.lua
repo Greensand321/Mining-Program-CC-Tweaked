@@ -1,19 +1,28 @@
 os.loadAPI("flex.lua")
 os.loadAPI("dig.lua")
 
+-- argument parsing
 local args = {...}
 if #args == 0 then
- flex.send("Usage: quarry <x> [z] [depth]",colors.lightBlue)
- return
+  flex.send("Usage: quarry <x> [z] [depth] [skip]", colors.lightBlue)
+  return
 end
 
 local xmax = tonumber(args[1])
 local zmax = tonumber(args[2]) or xmax
-local ymin = tonumber(args[3]) or 999
+local depth = tonumber(args[3]) or math.huge
+local skip = nil
+if args[4] and args[4] ~= "" then
+  skip = tonumber(args[4])
+  if not skip then
+    flex.send("Warning: skip value invalid, ignoring.", colors.yellow)
+    skip = nil
+  end
+end
 
-if xmax == nil or zmax == nil then
- flex.send("Invalid dimensions,",colors.red)
- return
+if not xmax or not zmax then
+  flex.send("Invalid dimensions.", colors.red)
+  return
 end
 
 
@@ -117,10 +126,33 @@ local xdir, zdir = 1, 1
 dig.gotox(0)
 dig.gotoz(0)
 dig.gotoy(dig.getYmin())
+
+-- remember home location to return for unloading
+local home = {
+  x = dig.getx(),
+  y = dig.gety(),
+  z = dig.getz(),
+  heading = 180,
+}
+
+local targetY = home.y - depth
+
+-- descend initial levels if skip provided
+if skip and skip > 0 then
+  for i = 1, skip do
+    if dig.gety() <= targetY then break end
+    dig.down()
+  end
+end
+
 local done = false
 
 while not done and not dig.isStuck() do
- 
+
+ if dig.gety() <= targetY then
+  break
+ end
+
  a = turtle.getFuelLevel()-1
  b = math.abs(dig.getx())
    + math.abs(dig.gety())
@@ -139,27 +171,27 @@ while not done and not dig.isStuck() do
   a = turtle.getFuelLevel()-1
  end --while
  
-if a <= b then
-  loc = dig.location()
-  flex.send("Fuel low; returning to base", colors.yellow)
-  dig.gotoy(0)
-  dig.goto(0, 0, 0, 180)
-  dropNotFuel()
-  refuelFromChest()
-  flex.send("Waiting for fuel...", colors.orange)
-  while turtle.getFuelLevel() - 1 <= b do
-    if not refuelFromChest() then
-      sleep(1)
-    end
-  end
+  if a <= b then
+   loc = dig.location()
+   flex.send("Fuel low; returning to base", colors.yellow)
+   dig.gotoy(home.y)
+   dig.goto(home.x, home.y, home.z, home.heading)
+   dropNotFuel()
+   refuelFromChest()
+   flex.send("Waiting for fuel...", colors.orange)
+   while turtle.getFuelLevel() - 1 <= b do
+     if not refuelFromChest() then
+       sleep(1)
+     end
+   end
 
-  while not fillFuelStack() do
-    sleep(1)
-  end
+   while not fillFuelStack() do
+     sleep(1)
+   end
 
-  flex.send("Thanks!", colors.lime)
-  dig.goto(loc)
-end
+   flex.send("Thanks!", colors.lime)
+   dig.goto(loc)
+  end
 
 turtle.select(1)
  
@@ -187,34 +219,42 @@ turtle.select(1)
  
  zdir = -zdir
  
- if dig.getx() == 0 and xdir == -1 then
-  dig.down()
-  xdir = 1
-  
- elseif dig.getx() == xmax-1 and xdir == 1 then
-  dig.down()
-  xdir = -1
-  
-else
-  dig.gotox(dig.getx() + xdir)
-end --if/else
+  if dig.getx() == 0 and xdir == -1 then
+   if dig.gety() - 1 < targetY then
+    done = true
+   else
+    dig.down()
+    xdir = 1
+   end
 
-if turtle.getItemCount(15) > 0 then
-  loc = dig.location()
-  dig.goto(0, 0, 0, 180)
-  dropNotFuel()
-  refuelFromChest()
+  elseif dig.getx() == xmax-1 and xdir == 1 then
+   if dig.gety() - 1 < targetY then
+    done = true
+   else
+    dig.down()
+    xdir = -1
+   end
 
-  while not fillFuelStack() do
-    sleep(1)
-  end
+ else
+   dig.gotox(dig.getx() + xdir)
+  end --if/else
 
-  dig.goto(loc)
-end --if
+  if turtle.getItemCount(15) > 0 then
+   loc = dig.location()
+   dig.goto(home.x, home.y, home.z, home.heading)
+   dropNotFuel()
+   refuelFromChest()
+
+   while not fillFuelStack() do
+     sleep(1)
+   end
+
+   dig.goto(loc)
+  end --if
 
 end --while
 
-dig.goto(0,0,0,180)
+ dig.goto(home.x, home.y, home.z, home.heading)
 for x=1,16 do
  turtle.select(x)
  turtle.drop()
