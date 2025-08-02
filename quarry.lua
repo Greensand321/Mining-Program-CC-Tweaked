@@ -51,54 +51,53 @@ local function dropNotFuel()
 end --function
 
 local function fillFuelStack()
- local slot
- for i=1,16 do
-  turtle.select(i)
-  if turtle.getItemCount(i) > 0 and turtle.refuel(0) then
-   slot = i
-   break
-  end --if
- end --for
- if not slot then
+  -- try existing fuel slot first
+  for i=1,16 do
+    turtle.select(i)
+    if turtle.getItemCount(i) > 0 and turtle.refuel(0) then
+      -- top up if possible but don’t block on full stack
+      if turtle.getItemCount(i) < 64 then
+        turtle.suck(64 - turtle.getItemCount(i))
+      end
+      turtle.select(1)
+      return true
+    end
+  end
+
+  -- no existing fuel: grab any available fuel from chest into empty slot
+  for i=1,16 do
+    turtle.select(i)
+    if turtle.getItemCount(i) == 0 then
+      turtle.suck(64)  -- will pull up to available amount
+      if turtle.getItemCount(i) > 0 and turtle.refuel(0) then
+        turtle.select(1)
+        return true
+      else
+        if turtle.getItemCount(i) > 0 then turtle.drop() end
+      end
+    end
+  end
+
   turtle.select(1)
-  if not turtle.suck(64) then
-   turtle.select(1)
-   return false
-  end --if
-  if not turtle.refuel(0) then
-   turtle.drop()
-   turtle.select(1)
-   return false
-  end --if
-  slot = 1
- end --if
- turtle.select(slot)
- while turtle.getItemCount(slot) < 64 do
-  if not turtle.suck(64 - turtle.getItemCount(slot)) then
-   turtle.select(1)
-   return false
-  end --if
- end --while
- turtle.select(1)
- return true
-end --function
+  return false
+end
 
 local function refuelFromChest()
-  -- try refueling from what's already in inventory
-  for x = 1, 16 do
-    turtle.select(x)
+  -- try refueling from inventory first
+  for i=1,16 do
+    turtle.select(i)
     if turtle.refuel(1) then
       turtle.select(1)
       return true
     end
   end
 
-  -- attempt to grab a full stack into an empty slot
-  for x = 1, 16 do
-    turtle.select(x)
-    if turtle.getItemCount(x) == 0 then
+  -- attempt to grab a full or partial stack into an empty slot and consume one
+  for i=1,16 do
+    turtle.select(i)
+    if turtle.getItemCount(i) == 0 then
       if turtle.suck(64) then
-        if turtle.refuel(0) then
+        if turtle.refuel(1) then
           turtle.select(1)
           return true
         else
@@ -108,10 +107,9 @@ local function refuelFromChest()
     end
   end
 
-  -- last resort: single item
+  -- last resort: single item from chest
   turtle.select(1)
   if turtle.suck(1) and turtle.refuel(1) then
-    turtle.select(1)
     return true
   end
 
@@ -123,9 +121,7 @@ local function fuelNeededToReturn()
   local dx = math.abs(dig.getx())
   local dy = math.abs(dig.gety())
   local dz = math.abs(dig.getz())
-  local base = dx + dy + dz
-  local buffer = 5
-  return base + buffer
+  return dx + dy + dz + 5  -- buffer
 end
 
 
@@ -171,14 +167,19 @@ while not done and not dig.isStuck() do
    dropNotFuel()
    refuelFromChest()
    flex.send("Waiting for fuel...", colors.orange)
-   while turtle.getFuelLevel() - 1 <= required do
+   local timeout = 0
+   local max_timeout = 10  -- seconds
+   while turtle.getFuelLevel() - 1 <= required and timeout < max_timeout do
      if not refuelFromChest() then
        sleep(1)
      end
+     timeout = timeout + 1
    end
 
-   while not fillFuelStack() do
+   timeout = 0
+   while not fillFuelStack() and timeout < max_timeout do
      sleep(1)
+     timeout = timeout + 1
    end
 
    flex.send("Thanks!", colors.lime)
@@ -237,8 +238,11 @@ while not done and not dig.isStuck() do
    dropNotFuel()
    refuelFromChest()
 
-   while not fillFuelStack() do
+   local timeout = 0
+   local max_timeout = 10  -- seconds
+   while not fillFuelStack() and timeout < max_timeout do
      sleep(1)
+     timeout = timeout + 1
    end
 
    dig.goto(loc)
