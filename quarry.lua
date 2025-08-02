@@ -41,6 +41,27 @@ local function dropNotFuel()
  turtle.select(1)
 end --function
 
+local function refuelFromChest()
+ for x=1,16 do
+  turtle.select(x)
+  if turtle.refuel(1) then
+   turtle.select(1)
+   return true
+  end --if
+ end --for
+ turtle.select(1)
+ if turtle.suck(1) then
+  if turtle.refuel(1) then
+   turtle.select(1)
+   return true
+  else
+   turtle.drop()
+  end --if
+ end --if
+ turtle.select(1)
+ return false
+end --function
+
 
 local a,b,c,x,y,z,r,loc
 local xdir, zdir = 1, 1
@@ -70,21 +91,21 @@ while not done and not dig.isStuck() do
  end --while
  
  if a <= b then
-  loc = dig.location()
-  flex.send("Fuel low; returning to base",colors.yellow)
-  dig.gotoy(0)
-  dig.goto(0,0,0,180)
-  dropNotFuel()
-  flex.send("Waiting for fuel...",colors.orange)
-  while turtle.getFuelLevel()-1 <= b do
-   for x=1,16 do
-    turtle.select(x)
-    if turtle.refuel(1) then break end
-   end --for
-  end --while
-  flex.send("Thanks!",colors.lime)
-  dig.goto(loc)
- end --if
+ loc = dig.location()
+ flex.send("Fuel low; returning to base",colors.yellow)
+ dig.gotoy(0)
+ dig.goto(0,0,0,180)
+ dropNotFuel()
+ refuelFromChest()
+ flex.send("Waiting for fuel...",colors.orange)
+ while turtle.getFuelLevel()-1 <= b do
+  if not refuelFromChest() then
+   sleep(1)
+  end --if
+ end --while
+ flex.send("Thanks!",colors.lime)
+ dig.goto(loc)
+end --if
  
  turtle.select(1)
  
@@ -127,10 +148,11 @@ while not done and not dig.isStuck() do
  
  if turtle.getItemCount(15) > 0 then
   loc = dig.location()
-  dig.goto(0,0,0,180)
-  dropNotFuel()
-  dig.goto(loc)
- end --if
+ dig.goto(0,0,0,180)
+ dropNotFuel()
+ refuelFromChest()
+ dig.goto(loc)
+end --if
  
 end --while
 
