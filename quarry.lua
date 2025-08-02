@@ -1,6 +1,34 @@
 os.loadAPI("flex.lua")
 os.loadAPI("dig.lua")
 
+local fuelValues = {
+  ["minecraft:coal"] = 80,
+  ["minecraft:charcoal"] = 80,
+  ["minecraft:blaze_rod"] = 120,
+  ["minecraft:lava_bucket"] = 1000,
+}
+
+local function inventoryFuelUnits()
+  local total = 0
+  local slot = turtle.getSelectedSlot()
+  for i = 1, 16 do
+    turtle.select(i)
+    local detail = turtle.getItemDetail()
+    if detail and detail.name then
+      local per = fuelValues[detail.name]
+      if per then
+        total = total + per * detail.count
+      end
+    end
+  end
+  turtle.select(slot)
+  return total
+end
+
+local function totalAvailableFuel()
+  return turtle.getFuelLevel() + inventoryFuelUnits()
+end
+
 -- argument parsing
 local args = {...}
 if #args == 0 then
@@ -81,41 +109,6 @@ local function fillFuelStack()
   turtle.select(1)
   return false
 end
-
-local function refuelFromChest()
-  -- try refueling from inventory first
-  for i=1,16 do
-    turtle.select(i)
-    if turtle.refuel(1) then
-      turtle.select(1)
-      return true
-    end
-  end
-
-  -- attempt to grab a full or partial stack into an empty slot and consume one
-  for i=1,16 do
-    turtle.select(i)
-    if turtle.getItemCount(i) == 0 then
-      if turtle.suck(64) then
-        if turtle.refuel(1) then
-          turtle.select(1)
-          return true
-        else
-          turtle.drop()
-        end
-      end
-    end
-  end
-
-  -- last resort: single item from chest
-  turtle.select(1)
-  if turtle.suck(1) and turtle.refuel(1) then
-    return true
-  end
-
-  turtle.select(1)
-  return false
-end
 local loc
 local xdir, zdir = 1, 1
 dig.gotox(0)
@@ -135,7 +128,50 @@ local home = {
 
 local targetY = home.y - depth
 local coalFuelValue = 80
-local lowFuelLevel = 3 * coalFuelValue
+local lowFuelThreshold = 3 * coalFuelValue
+
+local function topUpInternalFuel()
+  while turtle.getFuelLevel() < lowFuelThreshold and turtle.refuel(1) do
+  end
+end
+
+local function refuelFromChest()
+  -- try refueling from inventory first
+  for i = 1, 16 do
+    turtle.select(i)
+    if turtle.refuel(1) then
+      topUpInternalFuel()
+      turtle.select(1)
+      return true
+    end
+  end
+
+  -- attempt to grab a full or partial stack into an empty slot and consume one
+  for i = 1, 16 do
+    turtle.select(i)
+    if turtle.getItemCount(i) == 0 then
+      if turtle.suck(64) then
+        if turtle.refuel(1) then
+          topUpInternalFuel()
+          turtle.select(1)
+          return true
+        else
+          turtle.drop()
+        end
+      end
+    end
+  end
+
+  -- last resort: single item from chest
+  turtle.select(1)
+  if turtle.suck(1) and turtle.refuel(1) then
+    topUpInternalFuel()
+    return true
+  end
+
+  turtle.select(1)
+  return false
+end
 
 local function recoverStuck()
   flex.send(string.format("Stuck at %d,%d,%d; attempting recovery", dig.getx(), dig.gety(), dig.getz()), colors.red)
@@ -170,8 +206,12 @@ local done = false
 while not done do
 
  -- removed early depth exit check; completion handled after sweep
-
-  if turtle.getFuelLevel() < lowFuelLevel then
+ 
+  local internal = turtle.getFuelLevel()
+  local inventory = inventoryFuelUnits()
+  local total = internal + inventory
+  flex.send(string.format("Fuel: internal=%d inventory=%d total=%d", internal, inventory, total), colors.gray)
+  if total < lowFuelThreshold then
    loc = dig.location()
    flex.send("Fuel low; returning to base", colors.yellow)
    dig.gotoy(home.y)
@@ -182,7 +222,7 @@ while not done do
    flex.send("Waiting for fuel...", colors.orange)
    local timeout = 0
    local max_timeout = 10  -- seconds
-   while turtle.getFuelLevel() < lowFuelLevel and timeout < max_timeout do
+   while totalAvailableFuel() < lowFuelThreshold and timeout < max_timeout do
      if not refuelFromChest() then
        sleep(1)
      end
@@ -195,6 +235,7 @@ while not done do
      timeout = timeout + 1
    end
 
+   topUpInternalFuel()
    flex.send("Thanks!", colors.lime)
    dig.goto(loc)
    if dig.isStuck() and not recoverStuck() then return end
@@ -251,25 +292,26 @@ while not done do
    loc = dig.location()
    dig.goto(home.x, home.y, home.z, home.heading)
    if dig.isStuck() and not recoverStuck() then return end
-   dropNotFuel()
-   local timeout = 0
-   local max_timeout = 10  -- seconds
-   while turtle.getFuelLevel() < lowFuelLevel and timeout < max_timeout do
-     if not refuelFromChest() then
-       sleep(1)
-     end
-     timeout = timeout + 1
-   end
+  dropNotFuel()
+  local timeout = 0
+  local max_timeout = 10  -- seconds
+  while totalAvailableFuel() < lowFuelThreshold and timeout < max_timeout do
+    if not refuelFromChest() then
+      sleep(1)
+    end
+    timeout = timeout + 1
+  end
 
-   timeout = 0
-   while not fillFuelStack() and timeout < max_timeout do
-     sleep(1)
-     timeout = timeout + 1
-   end
+  timeout = 0
+  while not fillFuelStack() and timeout < max_timeout do
+    sleep(1)
+    timeout = timeout + 1
+  end
 
-   dig.goto(loc)
-   if dig.isStuck() and not recoverStuck() then return end
-  end --if
+  topUpInternalFuel()
+  dig.goto(loc)
+  if dig.isStuck() and not recoverStuck() then return end
+ end --if
 
 end --while
 
@@ -283,7 +325,7 @@ end
 refuelFromChest()
 local timeout = 0
 local max_timeout = 10  -- seconds
-while turtle.getFuelLevel() < lowFuelLevel and timeout < max_timeout do
+while totalAvailableFuel() < lowFuelThreshold and timeout < max_timeout do
  if not refuelFromChest() then
   sleep(1)
  end
@@ -295,6 +337,8 @@ while not fillFuelStack() and timeout < max_timeout do
  sleep(1)
  timeout = timeout + 1
 end
+
+topUpInternalFuel()
 
 turtle.select(1)
 dig.gotor(0)
