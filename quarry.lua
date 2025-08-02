@@ -95,6 +95,20 @@ local function refuelFromChest()
  return false
 end --function
 
+local function fillFuelStack()
+ for i=1,16 do
+  turtle.select(i)
+  if turtle.refuel(0) then
+   local need = 64 - turtle.getItemCount(i)
+   if need > 0 then
+    turtle.suck(need)
+   end --if
+   break
+  end --if
+ end --for
+ turtle.select(1)
+end --function
+
 
 local a,b,c,x,y,z,r,loc
 local xdir, zdir = 1, 1
@@ -123,27 +137,29 @@ while not done and not dig.isStuck() do
   a = turtle.getFuelLevel()-1
  end --while
  
- if a <= b then
- loc = dig.location()
- flex.send("Fuel low; returning to base",colors.yellow)
- dig.gotoy(0)
- dig.goto(0,0,0,180)
- dropNotFuel()
- refuelFromChest()
- flex.send("Waiting for fuel...",colors.orange)
- while turtle.getFuelLevel()-1 <= b do
-  if not refuelFromChest() then
-   sleep(1)
-  end --if
- end --while
- while not fillFuelStack() do
-  sleep(1)
- end --while
- flex.send("Thanks!",colors.lime)
- dig.goto(loc)
-end --if
- 
- turtle.select(1)
+if a <= b then
+  loc = dig.location()
+  flex.send("Fuel low; returning to base", colors.yellow)
+  dig.gotoy(0)
+  dig.goto(0, 0, 0, 180)
+  dropNotFuel()
+  refuelFromChest()
+  flex.send("Waiting for fuel...", colors.orange)
+  while turtle.getFuelLevel() - 1 <= b do
+    if not refuelFromChest() then
+      sleep(1)
+    end
+  end
+
+  while not fillFuelStack() do
+    sleep(1)
+  end
+
+  flex.send("Thanks!", colors.lime)
+  dig.goto(loc)
+end
+
+turtle.select(1)
  
  if zdir == 1 then
   dig.gotor(0)
@@ -177,24 +193,24 @@ end --if
   dig.down()
   xdir = -1
   
- else
-  dig.gotox(dig.getx()+xdir)
-  
- end --if/else
- 
- if turtle.getItemCount(15) > 0 then
- loc = dig.location()
- dig.goto(0,0,0,180)
- dropNotFuel()
- refuelFromChest()
- while not fillFuelStack() do
-  sleep(1)
- end --while
- dig.goto(loc)
-end --if
- 
-end --while
+else
+  dig.gotox(dig.getx() + xdir)
+end --if/else
 
+if turtle.getItemCount(15) > 0 then
+  loc = dig.location()
+  dig.goto(0, 0, 0, 180)
+  dropNotFuel()
+  refuelFromChest()
+
+  while not fillFuelStack() do
+    sleep(1)
+  end
+
+  dig.goto(loc)
+end --if
+
+end --while
 
 dig.goto(0,0,0,180)
 for x=1,16 do
