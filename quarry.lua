@@ -116,20 +116,14 @@ local function refuelFromChest()
   turtle.select(1)
   return false
 end
-
-local function fuelNeededToReturn()
-  local dx = math.abs(dig.getx())
-  local dy = math.abs(dig.gety())
-  local dz = math.abs(dig.getz())
-  return dx + dy + dz + 5  -- buffer
-end
-
-
 local loc
 local xdir, zdir = 1, 1
 dig.gotox(0)
+if dig.isStuck() and not recoverStuck() then return end
 dig.gotoz(0)
+if dig.isStuck() and not recoverStuck() then return end
 dig.gotoy(dig.getYmin())
+if dig.isStuck() and not recoverStuck() then return end
 
 -- remember home location to return for unloading
 local home = {
@@ -140,36 +134,55 @@ local home = {
 }
 
 local targetY = home.y - depth
+local coalFuelValue = 80
+local lowFuelLevel = 3 * coalFuelValue
+
+local function recoverStuck()
+  flex.send(string.format("Stuck at %d,%d,%d; attempting recovery", dig.getx(), dig.gety(), dig.getz()), colors.red)
+  local heading = dig.getr()
+  local attempts = 0
+  while dig.isStuck() and attempts < 3 do
+    dig.dig()
+    dig.gotor(heading + 180)
+    dig.fwd()
+    dig.gotor(heading)
+    dig.fwd()
+    attempts = attempts + 1
+  end
+  if dig.isStuck() then
+    flex.send(string.format("Unrecoverable stuck at %d,%d,%d after %d attempts", dig.getx(), dig.gety(), dig.getz(), attempts), colors.red)
+    return false
+  end
+  return true
+end
 
 -- descend initial levels if skip provided
 if skip and skip > 0 then
   for i = 1, skip do
     if dig.gety() <= targetY then break end
     dig.down()
+    if dig.isStuck() and not recoverStuck() then return end
   end
 end
 
 local done = false
 
-while not done and not dig.isStuck() do
+while not done do
 
- if dig.gety() <= targetY then
-  break
- end
+ -- removed early depth exit check; completion handled after sweep
 
-  local fuelLevel = turtle.getFuelLevel() - 1
-  local required = fuelNeededToReturn()
-  if fuelLevel <= required then
+  if turtle.getFuelLevel() < lowFuelLevel then
    loc = dig.location()
    flex.send("Fuel low; returning to base", colors.yellow)
    dig.gotoy(home.y)
+   if dig.isStuck() and not recoverStuck() then return end
    dig.goto(home.x, home.y, home.z, home.heading)
+   if dig.isStuck() and not recoverStuck() then return end
    dropNotFuel()
-   refuelFromChest()
    flex.send("Waiting for fuel...", colors.orange)
    local timeout = 0
    local max_timeout = 10  -- seconds
-   while turtle.getFuelLevel() - 1 <= required and timeout < max_timeout do
+   while turtle.getFuelLevel() < lowFuelLevel and timeout < max_timeout do
      if not refuelFromChest() then
        sleep(1)
      end
@@ -184,17 +197,17 @@ while not done and not dig.isStuck() do
 
    flex.send("Thanks!", colors.lime)
    dig.goto(loc)
+   if dig.isStuck() and not recoverStuck() then return end
   end
 
  turtle.select(1)
- 
+
  if zdir == 1 then
   dig.gotor(0)
   while dig.getz() < zmax-1 do
    dig.fwd()
    if dig.isStuck() then
-    done = true
-    break
+    if not recoverStuck() then return end
    end --if
   end --while
  elseif zdir == -1 then
@@ -202,12 +215,11 @@ while not done and not dig.isStuck() do
   while dig.getz() > 0 do
    dig.fwd()
    if dig.isStuck() then
-    done = true
-    break
+    if not recoverStuck() then return end
    end
   end --while
  end --if/else
- 
+
  if done then break end
  
  zdir = -zdir
@@ -217,6 +229,7 @@ while not done and not dig.isStuck() do
     done = true
    else
     dig.down()
+    if dig.isStuck() and not recoverStuck() then return end
     xdir = 1
    end
 
@@ -225,35 +238,62 @@ while not done and not dig.isStuck() do
     done = true
    else
     dig.down()
+    if dig.isStuck() and not recoverStuck() then return end
     xdir = -1
    end
 
  else
    dig.gotox(dig.getx() + xdir)
+   if dig.isStuck() and not recoverStuck() then return end
   end --if/else
 
   if turtle.getItemCount(15) > 0 then
    loc = dig.location()
    dig.goto(home.x, home.y, home.z, home.heading)
+   if dig.isStuck() and not recoverStuck() then return end
    dropNotFuel()
-   refuelFromChest()
-
    local timeout = 0
    local max_timeout = 10  -- seconds
+   while turtle.getFuelLevel() < lowFuelLevel and timeout < max_timeout do
+     if not refuelFromChest() then
+       sleep(1)
+     end
+     timeout = timeout + 1
+   end
+
+   timeout = 0
    while not fillFuelStack() and timeout < max_timeout do
      sleep(1)
      timeout = timeout + 1
    end
 
    dig.goto(loc)
+   if dig.isStuck() and not recoverStuck() then return end
   end --if
 
 end --while
 
  dig.goto(home.x, home.y, home.z, home.heading)
+ if dig.isStuck() and not recoverStuck() then return end
 for x=1,16 do
  turtle.select(x)
  turtle.drop()
+end
+
+refuelFromChest()
+local timeout = 0
+local max_timeout = 10  -- seconds
+while turtle.getFuelLevel() < lowFuelLevel and timeout < max_timeout do
+ if not refuelFromChest() then
+  sleep(1)
+ end
+ timeout = timeout + 1
+end
+
+timeout = 0
+while not fillFuelStack() and timeout < max_timeout do
+ sleep(1)
+ timeout = timeout + 1
 end
 
 turtle.select(1)
