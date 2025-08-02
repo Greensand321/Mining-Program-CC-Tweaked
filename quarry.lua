@@ -103,10 +103,12 @@ local function fillFuelStack()
    if need > 0 then
     turtle.suck(need)
    end --if
-   break
+   turtle.select(1)
+   return true
   end --if
  end --for
  turtle.select(1)
+ return false
 end --function
 
 
@@ -226,3 +228,4 @@ if fs.exists("startup.lua") then
 end
 os.unloadAPI("dig.lua")
 os.unloadAPI("flex.lua")
+
