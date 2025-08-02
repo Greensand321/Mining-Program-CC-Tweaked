@@ -5,7 +5,7 @@ This repository contains Lua scripts for the [CC: Tweaked](https://github.com/cc
 ## Getting Started
 1. Install CC: Tweaked and obtain a Turtle in your world.
 2. Copy the desired `.lua` files onto the turtle using `pastebin`, `wget`, or a disk.
-3. Ensure the turtle has fuel and the tools it needs (for example a diamond pickaxe and a modem for wireless features).
+3. Ensure the turtle has fuel and the tools it needs (for example a diamond pickaxe and a modem for wireless features). Fuel items in the turtle's inventory count toward its fuel reserve and are only consumed when needed.
 4. Keep all scripts in the same directory so that helper APIs such as `flex.lua` and `dig.lua` can be loaded by other programs.
 
 ## Included Programs
