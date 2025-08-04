@@ -24,4 +24,7 @@ quarry 16 16 30   -- dig a 16×16 quarry 30 blocks deep
 
 Run `receive` on a computer with a modem attached to monitor messages sent with `flex.lua`'s `send` function.
 
+## Global Control
+Turtles running `quarry.lua` listen for a Rednet broadcast of the string `RETURN`. Broadcasting `RETURN` causes every turtle to navigate home, unload, refuel, and then automatically resume mining. If the chest at home is missing, the turtle waits and reports an error until the chest is restored.
+
 These scripts are intended for experimentation. Adjust the code and parameters to suit your own mining setup.

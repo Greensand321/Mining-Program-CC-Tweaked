@@ -62,6 +62,41 @@ end --if
 dig.makeStartup("quarry",args)
 
 
+-- networking setup
+local modemSide
+for _, side in ipairs({"top", "bottom", "left", "right", "front", "back"}) do
+  if peripheral.getType(side) == "modem" then
+    modemSide = side
+    break
+  end
+end
+if modemSide then
+  rednet.open(modemSide)
+end
+
+local globalCommand = ""
+local function pollGlobal()
+  local senderId, message = rednet.receive(0)
+  if message then
+    message = tostring(message):upper():gsub("%s+", "")
+    if message == "RETURN" then
+      globalCommand = "RETURN"
+    end
+  end
+  return globalCommand
+end
+
+-- crash-safe run flag
+local runFlag = "quarry_running.flag"
+if fs.exists(runFlag) then
+  globalCommand = "RETURN"
+else
+  local f = fs.open(runFlag, "w")
+  f.write("running")
+  f.close()
+end
+
+
 local function dropNotFuel()
  flex.condense()
  local a,x
@@ -109,7 +144,6 @@ local function fillFuelStack()
   turtle.select(1)
   return false
 end
-local loc
 local xdir, zdir = 1, 1
 dig.gotox(0)
 if dig.isStuck() and not recoverStuck() then return end
@@ -192,6 +226,76 @@ local function recoverStuck()
   return true
 end
 
+local function isContainer(data)
+  return data and data.name and (data.name:find("chest") or data.name:find("barrel"))
+end
+
+local function isNextToChest()
+  local function check(inspectFunc)
+    local ok, data = inspectFunc()
+    return ok and isContainer(data)
+  end
+  if check(turtle.inspect) then return true end
+  if check(turtle.inspectUp) then return true end
+  if check(turtle.inspectDown) then return true end
+  turtle.turnLeft()
+  if check(turtle.inspect) then turtle.turnRight(); return true end
+  turtle.turnRight()
+  if check(turtle.inspect) then turtle.turnLeft(); return true end
+  turtle.turnLeft()
+  return false
+end
+
+local function waitForChest()
+  local err = "ERROR: No chest detected at home. Staying put."
+  if flex and colors then
+    flex.send(err, colors.red)
+  else
+    print(err)
+  end
+  while not isNextToChest() do
+    sleep(5)
+  end
+end
+
+local function returnToBase(returnAfter)
+  local loc
+  if returnAfter ~= false then
+    loc = dig.location()
+  end
+  dig.goto(home.x, home.y, home.z, home.heading)
+  if dig.isStuck() and not recoverStuck() then return false end
+  if not isNextToChest() then
+    waitForChest()
+  end
+  dropNotFuel()
+  local timeout = 0
+  local max_timeout = 10  -- seconds
+  while totalAvailableFuel() < lowFuelThreshold and timeout < max_timeout do
+    if not refuelFromChest() then
+      sleep(1)
+    end
+    timeout = timeout + 1
+  end
+  timeout = 0
+  while not fillFuelStack() and timeout < max_timeout do
+    sleep(1)
+    timeout = timeout + 1
+  end
+  topUpInternalFuel()
+  if returnAfter ~= false then
+    dig.goto(loc)
+    if dig.isStuck() and not recoverStuck() then return false end
+  end
+  turtle.select(1)
+  globalCommand = ""
+  return true
+end
+
+if globalCommand == "RETURN" then
+  returnToBase()
+end
+
 -- descend initial levels if skip provided
 if skip and skip > 0 then
   for i = 1, skip do
@@ -205,43 +309,21 @@ local done = false
 
 while not done do
 
- -- removed early depth exit check; completion handled after sweep
- 
+  pollGlobal()
+  if globalCommand == "RETURN" then
+    returnToBase()
+  end
+
   local internal = turtle.getFuelLevel()
   local inventory = inventoryFuelUnits()
   local total = internal + inventory
   flex.send(string.format("Fuel: internal=%d inventory=%d total=%d", internal, inventory, total), colors.gray)
   if total < lowFuelThreshold then
-   loc = dig.location()
-   flex.send("Fuel low; returning to base", colors.yellow)
-   dig.gotoy(home.y)
-   if dig.isStuck() and not recoverStuck() then return end
-   dig.goto(home.x, home.y, home.z, home.heading)
-   if dig.isStuck() and not recoverStuck() then return end
-   dropNotFuel()
-   flex.send("Waiting for fuel...", colors.orange)
-   local timeout = 0
-   local max_timeout = 10  -- seconds
-   while totalAvailableFuel() < lowFuelThreshold and timeout < max_timeout do
-     if not refuelFromChest() then
-       sleep(1)
-     end
-     timeout = timeout + 1
-   end
-
-   timeout = 0
-   while not fillFuelStack() and timeout < max_timeout do
-     sleep(1)
-     timeout = timeout + 1
-   end
-
-   topUpInternalFuel()
-   flex.send("Thanks!", colors.lime)
-   dig.goto(loc)
-   if dig.isStuck() and not recoverStuck() then return end
+    flex.send("Fuel low; returning to base", colors.yellow)
+    returnToBase()
   end
 
- turtle.select(1)
+  turtle.select(1)
 
  if zdir == 1 then
   dig.gotor(0)
@@ -289,34 +371,16 @@ while not done do
   end --if/else
 
   if turtle.getItemCount(15) > 0 then
-   loc = dig.location()
-   dig.goto(home.x, home.y, home.z, home.heading)
-   if dig.isStuck() and not recoverStuck() then return end
-  dropNotFuel()
-  local timeout = 0
-  local max_timeout = 10  -- seconds
-  while totalAvailableFuel() < lowFuelThreshold and timeout < max_timeout do
-    if not refuelFromChest() then
-      sleep(1)
-    end
-    timeout = timeout + 1
+    returnToBase()
   end
-
-  timeout = 0
-  while not fillFuelStack() and timeout < max_timeout do
-    sleep(1)
-    timeout = timeout + 1
-  end
-
-  topUpInternalFuel()
-  dig.goto(loc)
-  if dig.isStuck() and not recoverStuck() then return end
- end --if
 
 end --while
 
  dig.goto(home.x, home.y, home.z, home.heading)
  if dig.isStuck() and not recoverStuck() then return end
+ if not isNextToChest() then
+  waitForChest()
+ end
 for x=1,16 do
  turtle.select(x)
  turtle.drop()
@@ -342,6 +406,8 @@ topUpInternalFuel()
 
 turtle.select(1)
 dig.gotor(0)
+
+if fs.exists(runFlag) then fs.delete(runFlag) end
 
 if fs.exists("startup.lua") then
  shell.run("rm startup.lua")
